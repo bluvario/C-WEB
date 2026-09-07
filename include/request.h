@@ -24,6 +24,9 @@ typedef struct {
     String_View path;    // target without the query string
     String_View query;   // query string without the leading '?', empty if none
     String_View version; // "HTTP/1.1" etc.
+    // everything after the header block, clamped to Content-Length when the
+    // header is present. chunked transfer encoding is not handled yet.
+    String_View body;
 
     Http_Header_Array headers;
 } Http_Request;

@@ -74,7 +74,7 @@ static int parse_header_line(Http_Request *req, String_View line)
 Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
 {
     req->method = HTTP_UNKNOWN_METHOD;
-    req->target = req->path = req->query = req->version = (String_View){0};
+    req->target = req->path = req->query = req->version = req->body = (String_View){0};
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
@@ -100,6 +100,22 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
             parse_header_line(req, line);
         }
         lineno++;
+    }
+
+    req->body = (String_View){raw.data + end, raw.count - end};
+    const String_View *cl = http_request_get_header(req, "content-length");
+    if (cl) {
+        long long len;
+        if (!sv_to_i64(*cl, &len) || len < 0) {
+            http_request_free(req);
+            return REQ_ERROR;
+        }
+        if ((size_t)len < req->body.count) {
+            req->body.count = (size_t)len;
+        } else if ((size_t)len > req->body.count) {
+            http_request_free(req);
+            return REQ_INCOMPLETE;
+        }
     }
     return REQ_OK;
 }

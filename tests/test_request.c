@@ -49,6 +49,20 @@ int main(void)
     fails += check("no query on /login", sv_equal(req.query, sv_from_cstr("")));
     const String_View *cl = http_request_get_header(&req, "Content-Length");
     fails += check("content-length parsed", cl != NULL && sv_equal(*cl, sv_from_cstr("11")));
+    fails += check("body clamped to content-length", sv_equal(req.body, sv_from_cstr("hello=world")));
+    http_request_free(&req);
+
+    // no Content-Length means the body is everything left in the buffer
+    String_View raw5 = sv_from_cstr("POST /x HTTP/1.1\r\n\r\nraw rest");
+    Request_Parse_Result r5 = http_request_parse(&req, raw5);
+    fails += check("no-content-length body okay", r5 == REQ_OK);
+    fails += check("body takes the remainder", sv_equal(req.body, sv_from_cstr("raw rest")));
+    http_request_free(&req);
+
+    // Content-Length bigger than what arrived means the request is incomplete
+    String_View raw6 = sv_from_cstr("POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nshort");
+    Request_Parse_Result r6 = http_request_parse(&req, raw6);
+    fails += check("short body reported incomplete", r6 == REQ_INCOMPLETE);
     http_request_free(&req);
 
     // truncated request, needs more bytes
