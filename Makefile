@@ -2,7 +2,9 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
 PREFIX  ?= /usr/local
 
-LIB_SRC := src/core/cweb.c
+LIB_SRC := src/core/cweb.c src/utils/strbuf.c
+
+TESTS := test_version test_strbuf
 
 all: build/libcweb.a
 
@@ -13,11 +15,12 @@ build/%.o: %.c
 build/libcweb.a: $(LIB_SRC:%.c=build/%.o)
 	$(AR) rcs $@ $^
 
-build/test_version: tests/test_version.c build/libcweb.a
-	$(CC) $(CFLAGS) -Iinclude -o $@ tests/test_version.c build/libcweb.a
+build/tests/%: tests/%.c build/libcweb.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Iinclude -o $@ $< build/libcweb.a
 
-test: build/test_version
-	./build/test_version
+test: $(TESTS:%=build/tests/%)
+	@for t in $(TESTS); do ./build/tests/$$t || exit 1; done
 
 clean:
 	rm -rf build
