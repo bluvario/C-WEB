@@ -2,9 +2,9 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
 PREFIX  ?= /usr/local
 
-LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c
+LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c
 
-TESTS := test_version test_strbuf test_da test_file
+TESTS := test_version test_strbuf test_da test_file test_sv
 
 all: build/libcweb.a
 
