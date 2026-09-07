@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "xmem.h"
+
 #define SB_MIN_CAP 256
 
 void strbuf_init(Strbuf *sb)
@@ -24,10 +26,8 @@ static int sb_grow_to(Strbuf *sb, size_t want)
     while (cap < want) {
         cap *= 2;
     }
-    char *mem = realloc(sb->items, cap);
-    if (!mem) {
-        return -1;
-    }
+    // xrealloc aborts on OOM, so failure is not actually possible
+    char *mem = xrealloc(sb->items, cap);
     sb->items = mem;
     sb->capacity = cap;
     return 0;
