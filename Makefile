@@ -2,9 +2,9 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
 PREFIX  ?= /usr/local
 
-LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/security/escape.c
+LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/security/escape.c src/http/http.c
 
-TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_escape
+TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_escape test_http
 
 all: build/libcweb.a
 
