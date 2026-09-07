@@ -2,6 +2,7 @@
 
 #include "strbuf.h"
 #include "sv.h"
+#include "xmem.h"
 
 static int hexval(char c)
 {
@@ -63,4 +64,16 @@ void url_encode_into(Strbuf *sb, String_View src)
             strbuf_append_char(sb, HEX[c & 0xF]);
         }
     }
+}
+
+char *url_decode_alloc(String_View src)
+{
+    Strbuf sb;
+    strbuf_init(&sb);
+    if (url_decode_into(&sb, src) != 0) {
+        strbuf_free(&sb);
+        return NULL;
+    }
+    strbuf_null_terminate(&sb);
+    return sb.items; // caller takes ownership
 }
