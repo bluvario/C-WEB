@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "file.h"
 #include "strbuf.h"
@@ -114,7 +115,12 @@ int main(void)
         "you are <?c= numbuf ?>\n"
         "safe <?h= sv_from_cstr(\"<b>&</b>\") ?>\n";
 
-    const char *tpl_dir = "/tmp/opencode";
+    char tpl_dir[64];
+    strcpy(tpl_dir, "/tmp/cweb_template_test_XXXXXX");
+    if (mkdtemp(tpl_dir) == NULL) {
+        fprintf(stderr, "mkdtemp failed\n");
+        return 1;
+    }
     char tpl_path[512];
     snprintf(tpl_path, sizeof tpl_path, "%s/hello.c.html", tpl_dir);
     FILE *f = fopen(tpl_path, "w");
@@ -208,6 +214,16 @@ int main(void)
 
     strbuf_free(&out);
     strbuf_free(&err);
+
+    unlink(tpl_path);
+    unlink(gen_path);
+    unlink(main_path);
+    unlink(bin_path);
+    unlink(warn_path);
+    char out_path[512];
+    snprintf(out_path, sizeof out_path, "%s/hello_output.txt", tpl_dir);
+    unlink(out_path);
+    rmdir(tpl_dir);
 
     if (fails == 0) {
         printf("template ok\n");
