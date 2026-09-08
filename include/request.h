@@ -25,7 +25,9 @@ typedef struct {
     String_View query;   // query string without the leading '?', empty if none
     String_View version; // "HTTP/1.1" etc.
     // everything after the header block, clamped to Content-Length when the
-    // header is present. chunked transfer encoding is not handled yet.
+    // header is present, or contiguous decoded bytes after a chunked body has
+    // been unfolded by http_request_decode_chunked. the view borrows from the
+    // raw request bytes.
     String_View body;
 
     Http_Header_Array headers;
@@ -42,6 +44,15 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw);
 // to this one request (headers plus declared body), so the socket layer can
 // keep any pipelined remainder buffered.
 Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, size_t *consumed);
+// Unfolds a Transfer-Encoding: chunked body in place inside raw (the buffer
+// the request bytes live in and that req->body borrows from), leaving req->body
+// pointing at contiguous decoded bytes. On success sets *consumed to the full
+// length the request occupied in raw and returns 0. Returns 1 when the body is
+// incomplete (caller should read more and re-parse) and -1 on malformed
+// framing or when Content-Length is present alongside chunking (a request
+// smuggling vector).
+int http_request_decode_chunked(Http_Request *req, char *raw, size_t raw_count,
+                                size_t *consumed);
 void http_request_free(Http_Request *req);
 
 // case-insensitive header lookup (HTTP names are case-insensitive),

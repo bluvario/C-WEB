@@ -130,6 +130,95 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
     return http_request_parse_adv(req, raw, &consumed);
 }
 
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int http_request_decode_chunked(Http_Request *req, char *raw, size_t raw_count,
+                                size_t *consumed)
+{
+    (void)raw_count;
+    // chunking and Content-Length together is a request smuggling vector, so
+    // contradict each other openly; refuse rather than guess (RFC 9112 7.1)
+    if (http_request_get_header(req, "content-length") != NULL) {
+        return -1;
+    }
+
+    char *data = (char *)req->body.data; // alias, so we can overwrite framing
+    size_t len = req->body.count;
+    size_t r = 0; // cursor reading the chunked stream
+    size_t w = 0; // cursor writing decoded bytes (never overtakes r)
+    for (;;) {
+        // a stray CRLF between chunks is allowed; otherwise the chunk line
+        // begins here
+        while (r < len && (data[r] == '\r' || data[r] == '\n')) {
+            r++;
+        }
+        if (r >= len) {
+            return 1; // chunk size line never arrived
+        }
+        size_t size = 0;
+        bool saw_digit = false;
+        while (r < len) {
+            int v = hex_value(data[r]);
+            if (v >= 0) {
+                size = size * 16 + (size_t)v;
+                saw_digit = true;
+                r++;
+            } else if (data[r] == ';' || data[r] == ' ') {
+                // chunk extensions (";ext=value") and padding are ignored
+                while (r < len && data[r] != '\r' && data[r] != '\n') {
+                    r++;
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+        if (!saw_digit || r + 1 >= len || data[r] != '\r' || data[r + 1] != '\n') {
+            return -1;
+        }
+        r += 2;
+        if (size == 0) {
+            // the trailer block, at least an empty line; anything after the
+            // zero chunk is trailers, and they disappear with the response
+            if (r + 1 <= len && data[r] == '\r' && data[r + 1] == '\n') {
+                r += 2;
+            } else if (r < len) {
+                while (r < len && data[r] != '\r' && data[r] != '\n') {
+                    r++;
+                }
+                if (r + 1 < len && data[r] == '\r' && data[r + 1] == '\n') {
+                    r += 2;
+                } else if (r < len && data[r] == '\n') {
+                    r++;
+                } else {
+                    return 1; // trailer line without its terminator yet
+                }
+            }
+            break;
+        }
+        if (r + size > len) {
+            return 1; // the chunk payload is still arriving
+        }
+        // slide the payload over the framing bytes we no longer need
+        memmove(data + w, data + r, size);
+        w += size;
+        r += size;
+        if (r + 1 >= len || data[r] != '\r' || data[r + 1] != '\n') {
+            return -1;
+        }
+        r += 2;
+    }
+    req->body = (String_View){(const char *)data, w};
+    *consumed = (size_t)(data - raw) + r;
+    return 0;
+}
+
 void http_request_free(Http_Request *req)
 {
     xfree(req->headers.items);

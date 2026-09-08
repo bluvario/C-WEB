@@ -140,7 +140,39 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
                 rb_commit(&rb, (size_t)n);
                 continue;
             }
-            break; // REQ_OK or REQ_ERROR
+            if (pr == REQ_ERROR) {
+                break;
+            }
+            // chunked bodies can still be incomplete even though the headers
+            // parsed, so decode on every pass and keep reading when the
+            // framing calls for bytes that have not arrived yet
+            if (http_request_get_header(&req, "transfer-encoding") != NULL) {
+                int dr = http_request_decode_chunked(&req, rb.data, rb.count, &consumed);
+                if (dr > 0) {
+                    http_request_free(&req);
+                    if (rb.count >= rb.capacity) {
+                        log_warn("request exceeds %zu bytes, sending 413", REQUEST_BUFFER_CAP);
+                        send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                        rb_free(&rb);
+                        return;
+                    }
+                    String_View head = rb_write_head(&rb);
+                    long n = net_recv(client, (void *)head.data, head.count);
+                    if (n <= 0) {
+                        rb_free(&rb);
+                        return;
+                    }
+                    rb_commit(&rb, (size_t)n);
+                    continue;
+                }
+                if (dr < 0) {
+                    log_warn("malformed chunked request from client, sending 400");
+                    http_request_free(&req);
+                    send_error(client, HTTP_400_BAD_REQUEST);
+                    break;
+                }
+            }
+            break; // REQ_OK, chunked payload fully unfolded
         }
 
         if (pr == REQ_ERROR) {
