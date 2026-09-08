@@ -298,6 +298,86 @@ int main(void)
 
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
+
+    // --- cweb new scaffolds a runnable app into a fresh dir ---
+    int app_ok = 1;
+    char app[512], app_out[1024];
+    snprintf(app, sizeof app, "%s/app", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s new %s >/dev/null", TOOL, app);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb new failed\n");
+        return 1;
+    }
+    const char *app_names[] = {"views/index.c.html", "views/404.c.html",
+                               "views/partials/footer.c.html", "static/style.css"};
+    for (size_t i = 0; i < sizeof app_names / sizeof app_names[0]; i++) {
+        snprintf(path, sizeof path, "%s/%s", app, app_names[i]);
+        if (access(path, F_OK) != 0) {
+            fprintf(stderr, "missing scaffolded %s\n", path);
+            return 1;
+        }
+    }
+
+    // a non-empty dir must be refused
+    char taken[512];
+    snprintf(taken, sizeof taken, "%s/taken", tmp);
+    mkdir(taken, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/keep.txt", taken);
+    wfile(wbuf, "x");
+    snprintf(wbuf, sizeof wbuf, "%s new %s >/dev/null 2>&1", TOOL, taken);
+    if (system(wbuf) == 0) {
+        fprintf(stderr, "cweb new should refuse a non-empty dir\n");
+        return 1;
+    }
+
+    // the scaffold builds and serves its page, stylesheet and 404 page
+    snprintf(app_out, sizeof app_out, "%s/out", app);
+    snprintf(wbuf, sizeof wbuf, "%s build %s/views %s . %s/static >/dev/null",
+             TOOL, app, app_out, app);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the scaffolded app\n");
+        return 1;
+    }
+    probe = net_listen(0);
+    int app_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(path, sizeof path, "%s/server", app_out);
+    snprintf(port_arg, sizeof port_arg, "%d", app_port);
+    child = fork();
+    if (child == 0) {
+        execl(path, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(app_port) != 0) {
+        fprintf(stderr, "scaffolded server did not come up on port %d\n", app_port);
+        return 1;
+    }
+    char *app_body = fetch(app_port, "/");
+    app_ok = app_ok && app_body != NULL && strstr(app_body, "HTTP/1.1 200 OK") != NULL &&
+             strstr(app_body, "cweb app") != NULL &&
+             strstr(app_body, "Powered by C-WEB") != NULL;
+    if (!app_ok) {
+        fprintf(stderr, "scaffolded home page failed:\n%s\n", app_body ? app_body : "(connect error)");
+    }
+    free(app_body);
+    app_body = fetch(app_port, "/style.css");
+    app_ok = app_ok && app_body != NULL && strstr(app_body, "HTTP/1.1 200 OK") != NULL &&
+             strstr(app_body, "text/css") != NULL;
+    if (!app_ok) {
+        fprintf(stderr, "scaffolded stylesheet failed:\n%s\n", app_body ? app_body : "(connect error)");
+    }
+    free(app_body);
+    app_body = fetch(app_port, "/nope");
+    app_ok = app_ok && app_body != NULL && strstr(app_body, "HTTP/1.1 404") != NULL &&
+             strstr(app_body, "no such page") != NULL;
+    if (!app_ok) {
+        fprintf(stderr, "scaffolded 404 page failed:\n%s\n", app_body ? app_body : "(connect error)");
+    }
+    free(app_body);
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+
+    ok = ok && app_ok;
     net_cleanup();
 
     // tidy up the fixture tree

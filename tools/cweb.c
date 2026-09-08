@@ -6,6 +6,8 @@
 //                             out/main.c and link out/server against libcweb.a
 //   cweb serve views/ [port [root [static/]]]
 //                             build into a scratch dir and run it
+//   cweb new app/             scaffold a fresh project: pages, a 404 page, a
+//                             shared partial and a stylesheet, ready to serve
 //   cweb version
 //
 // every route answers GET and POST (the same handler, so pages branch on
@@ -557,6 +559,130 @@ static int cmd_build(int argc, char **argv)
 }
 
 // ---------------------------------------------------------------------------
+// new: scaffold a runnable app
+// ---------------------------------------------------------------------------
+
+static int write_file(const char *path, const char *data)
+{
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        return -1;
+    }
+    fputs(data, f);
+    fclose(f);
+    return 0;
+}
+
+// true when dir exists and holds anything besides "." and ".."
+static int dir_has_entries(const char *path)
+{
+    DIR *d = opendir(path);
+    if (d == NULL) {
+        return 0;
+    }
+    struct dirent *e;
+    int has = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
+            has = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return has;
+}
+
+static int cmd_new(int argc, char **argv)
+{
+    if (argc < 3) {
+        return die("new needs an app dir (cweb new APP_DIR)");
+    }
+    // refuse only when a non-empty dir occupies the spot; an empty dir is fine
+    struct stat st;
+    if (stat(argv[2], &st) == 0 && dir_has_entries(argv[2])) {
+        return die("app dir exists and is not empty");
+    }
+
+    char app[4096], sub[512];
+    mkdir_p(argv[2]);                     // creates the app dir
+    path_join(sub, sizeof sub, argv[2], "views/partials");
+    mkdir_p(sub);                         // creates views and views/partials
+    path_join(sub, sizeof sub, argv[2], "static");
+    mkdir_p(sub);
+
+    path_join(app, sizeof app, argv[2], "views/index.c.html");
+    if (write_file(app,
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "  <title>cweb app</title>\n"
+        "  <link rel=\"stylesheet\" href=\"/style.css\">\n"
+        "</head>\n"
+        "<body>\n"
+        "  <h1>cweb app</h1>\n"
+        "  <p>Built by <strong>cweb build</strong>. Edit this page at\n"
+        "  <code>views/index.c.html</code>.</p>\n"
+        "  <p>Serve it again with <code>cweb serve views 8080 . static</code>.</p>\n"
+        "  <?c page_footer(req, res, params, user_data); ?>\n"
+        "</body>\n"
+        "</html>\n") != 0) {
+        return die("cannot write views/index.c.html");
+    }
+    path_join(app, sizeof app, argv[2], "views/404.c.html");
+    if (write_file(app,
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "  <title>Not found · cweb app</title>\n"
+        "  <link rel=\"stylesheet\" href=\"/style.css\">\n"
+        "</head>\n"
+        "<body>\n"
+        "  <h1>404 · no such page</h1>\n"
+        "  <p>Nothing is served at this address.</p>\n"
+        "  <p><a href=\"/\">Back to the start</a></p>\n"
+        "  <?c page_footer(req, res, params, user_data); ?>\n"
+        "</body>\n"
+        "</html>\n") != 0) {
+        return die("cannot write views/404.c.html");
+    }
+    path_join(app, sizeof app, argv[2], "views/partials/footer.c.html");
+    if (write_file(app,
+        "<footer>Powered by C-WEB</footer>\n") != 0) {
+        return die("cannot write views/partials/footer.c.html");
+    }
+    path_join(app, sizeof app, argv[2], "static/style.css");
+    if (write_file(app,
+        "body {\n"
+        "  font-family: system-ui, sans-serif;\n"
+        "  max-width: 36rem;\n"
+        "  margin: 3rem auto;\n"
+        "  padding: 0 1rem;\n"
+        "  color: #222;\n"
+        "}\n"
+        "\n"
+        "h1 {\n"
+        "  border-bottom: 2px solid #bcd;\n"
+        "  padding-bottom: .4rem;\n"
+        "}\n"
+        "\n"
+        "code, footer {\n"
+        "  color: #556;\n"
+        "}\n") != 0) {
+        return die("cannot write static/style.css");
+    }
+
+    printf("created %s/\n"
+           "  views/index.c.html     home page (handles GET and POST)\n"
+           "  views/404.c.html       custom not-found page\n"
+           "  views/partials         reusable fragments, never routes\n"
+           "  static/style.css       served from the /* mount\n"
+           "\n"
+           "next: cd %s && cweb serve views 8080 . static\n",
+           argv[2], argv[2]);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // serve / version
 // ---------------------------------------------------------------------------
 
@@ -609,6 +735,7 @@ static void usage(FILE *f)
         "                                  VIEWS_DIR/**/*.c.html into C, emit\n"
         "                                  OUT_DIR/main.c and link OUT_DIR/server\n"
         "  serve VIEWS_DIR [PORT [ROOT [STATIC]]] build into a scratch dir and run it\n"
+        "  new APP_DIR                     scaffold a runnable app skeleton\n"
         "  version                         print the framework version\n"
         "\n"
         "ROOT (default \".\") is the project root holding include/ and\n"
@@ -629,6 +756,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "build") == 0) {
         return cmd_build(argc, argv);
+    }
+    if (strcmp(argv[1], "new") == 0) {
+        return cmd_new(argc, argv);
     }
     if (strcmp(argv[1], "serve") == 0) {
         return cmd_serve(argc, argv);
