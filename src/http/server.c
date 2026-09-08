@@ -7,6 +7,7 @@
 #endif
 
 #include <ctype.h>
+#include <signal.h>
 #include <string.h>
 #include <time.h>
 
@@ -27,6 +28,17 @@ static const size_t REQUEST_BUFFER_CAP = 64 * 1024;
 
 // how long a client may dawdle between bytes without losing the connection
 static const unsigned long REQUEST_TIMEOUT_MS = 5000;
+
+// a SIGINT/SIGTERM flips this and the accept loop winds down instead of
+// spinning; only the flag write happens in a signal context, which is just
+// barely safe enough, and it is the only thing the handler does
+static volatile sig_atomic_t g_shutdown = 0;
+
+static void handle_signal(int sig)
+{
+    (void)sig;
+    g_shutdown = 1;
+}
 
 static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
 
@@ -282,6 +294,19 @@ static void connection_worker(void *arg)
 
 int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
 {
+#ifdef _WIN32
+    // TODO: a graceful-stop flag on Windows too, via a console ctrl handler
+#else
+    // gain the loudest close signals so the loop can drain instead of dying
+    // mid-request; the old dispositions are deliberately not restored while
+    // the accept loop lives
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+#endif
+
     Thread_Pool pool;
     if (thread_pool_init(&pool, 0, connection_worker) != 0) {
         log_error("could not start the worker pool");
@@ -291,6 +316,11 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
     for (;;) {
         Socket_Handle client = net_accept(listener);
         if (client == -1) {
+#ifndef _WIN32
+            if (g_shutdown) {
+                break;
+            }
+#endif
             // TODO: back off on EMFILE instead of spinning
             log_error("accept failed: %s", net_error_string());
             continue;
@@ -309,6 +339,8 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
         }
     }
 
+    // stop taking new work is done above; now let in-flight requests finish
+    log_info("shutting down: draining %zu queued jobs", pool.queued);
     thread_pool_wait(&pool);
     thread_pool_free(&pool);
     return 0;

@@ -15,8 +15,9 @@ typedef void (*Http_Handler_Fn)(Http_Request *req, Http_Response *res, void *use
 // a 408.
 void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data);
 
-// accept loop that never returns on its own. one thread per connection for
-// now, wants a thread pool eventually.
+// accept loop that runs until SIGINT/SIGTERM, then drains the in-flight
+// connections and returns 0. malformed requests get a 400, oversized ones a
+// 413, stalled clients a 408.
 int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data);
 
 #endif
