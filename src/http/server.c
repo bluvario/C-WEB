@@ -1,7 +1,14 @@
+#define _POSIX_C_SOURCE 199309L
+
 #include "server.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <ctype.h>
 #include <string.h>
+#include <time.h>
 
 #include "buffer.h"
 #include "http.h"
@@ -17,6 +24,30 @@
 static const size_t REQUEST_BUFFER_CAP = 64 * 1024;
 
 static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
+
+// wall-clock milliseconds for request timing, monotonic so NTP jumps don't
+// skew the numbers
+static unsigned long long mono_ms(void)
+{
+#ifdef _WIN32
+    return (unsigned long long)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000 + (unsigned long long)ts.tv_nsec / 1000000;
+#endif
+}
+
+static void log_request(Http_Request *req, Http_Response *res, unsigned long long elapsed_ms)
+{
+    const char *method = http_method_name(req->method);
+    if (method == NULL) {
+        method = "???";
+    }
+    log_info("%s %.*s -> %d in %llu ms", method,
+             (int)req->path.count, req->path.data,
+             (int)res->status, elapsed_ms);
+}
 
 static void send_wire(Socket_Handle client, Http_Response *res)
 {
@@ -121,8 +152,11 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         bool keep = conn_keep_alive(&req);
         Http_Response res;
         http_response_init(&res);
+        unsigned long long t0 = mono_ms();
         handler(&req, &res, user_data);
+        unsigned long long elapsed = mono_ms() - t0;
         res.keep_alive = keep;
+        log_request(&req, &res, elapsed);
         http_request_free(&req);
 
         send_wire(client, &res);
