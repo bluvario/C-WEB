@@ -92,3 +92,106 @@ int thread_hardware_parallelism(void)
 #endif
     return n > 0 ? (int)n : 1;
 }
+
+int mutex_init(Mutex *mu)
+{
+#ifdef _WIN32
+    CRITICAL_SECTION *cs = xmalloc(sizeof *cs);
+    InitializeCriticalSection(cs);
+    mu->handle = cs;
+#else
+    pthread_mutex_t *m = xmalloc(sizeof *m);
+    if (pthread_mutex_init(m, NULL) != 0) {
+        xfree(m);
+        return -1;
+    }
+    mu->handle = m;
+#endif
+    return 0;
+}
+
+void mutex_lock(Mutex *mu)
+{
+#ifdef _WIN32
+    EnterCriticalSection(mu->handle);
+#else
+    pthread_mutex_lock(mu->handle);
+#endif
+}
+
+void mutex_unlock(Mutex *mu)
+{
+#ifdef _WIN32
+    LeaveCriticalSection(mu->handle);
+#else
+    pthread_mutex_unlock(mu->handle);
+#endif
+}
+
+void mutex_destroy(Mutex *mu)
+{
+#ifdef _WIN32
+    DeleteCriticalSection(mu->handle);
+#else
+    pthread_mutex_destroy(mu->handle);
+#endif
+    xfree(mu->handle);
+    mu->handle = NULL;
+}
+
+int cond_init(Cond *c)
+{
+#ifdef _WIN32
+    CONDITION_VARIABLE *cv = xmalloc(sizeof *cv);
+    InitializeConditionVariable(cv);
+    c->handle = cv;
+#else
+    pthread_cond_t *cc = xmalloc(sizeof *cc);
+    if (pthread_cond_init(cc, NULL) != 0) {
+        xfree(cc);
+        return -1;
+    }
+    c->handle = cc;
+#endif
+    return 0;
+}
+
+int cond_wait(Cond *c, Mutex *mu)
+{
+#ifdef _WIN32
+    return SleepConditionVariableCS(c->handle, mu->handle, INFINITE) ? 0 : -1;
+#else
+    return pthread_cond_wait(c->handle, mu->handle);
+#endif
+}
+
+int cond_signal(Cond *c)
+{
+#ifdef _WIN32
+    WakeConditionVariable(c->handle);
+    return 0;
+#else
+    return pthread_cond_signal(c->handle);
+#endif
+}
+
+int cond_broadcast(Cond *c)
+{
+#ifdef _WIN32
+    WakeAllConditionVariable(c->handle);
+    return 0;
+#else
+    return pthread_cond_broadcast(c->handle);
+#endif
+}
+
+void cond_destroy(Cond *c)
+{
+#ifdef _WIN32
+    // CONDITION_VARIABLE needs no teardown
+#else
+    pthread_cond_destroy(c->handle);
+#endif
+    xfree(c->handle);
+    c->handle = NULL;
+}
