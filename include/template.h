@@ -1,0 +1,32 @@
+#ifndef CWEB_TEMPLATE_H
+#define CWEB_TEMPLATE_H
+
+#include "strbuf.h"
+#include "sv.h"
+
+// The .c.html compiler: takes a page written as HTML with C spliced in and
+// emits C source for a route handler
+//
+//   static void <fn_name>(Http_Request *req, Http_Response *res,
+//                         Str_Map *params, void *user_data)
+//
+// so the output drops straight into router_add. Everything outside the code
+// tags is emitted verbatim into the response body. three forms are supported:
+//
+//   <?c ... ?>   raw C statements, executed as-is. req, res, params and
+//                user_data are in scope, as are stdio/stdlib/string/stdint.
+//   <?c= expr ?> appends expr to the body as-is; expr must be a const char*.
+//   <?h= expr ?> appends html_escape_into(res->body, expr); expr is a
+//                String_View, e.g. sv_from_cstr(user_name).
+//
+// the generated handler sets Content-Type text/html before any of the above.
+// returns 0 with the C source appended to out, or -1 with a message in *err
+// (may be NULL) when the template is malformed.
+int cweb_template_to_c(String_View source, const char *fn_name,
+                       Strbuf *out, Strbuf *err);
+
+// like cweb_template_to_c but reads the page from disk and derives the fn
+// name from the basename: "views/MyPage.c.html" becomes page_MyPage.
+int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err);
+
+#endif
