@@ -2,14 +2,11 @@
 
 #include "middleware.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
+#include "date.h"
 #include "xmem.h"
 
 // each middleware becomes one node in a linked trampoline: the wrapper carries
@@ -100,18 +97,6 @@ void http_middleware_data_free(void *handler_data)
 }
 
 // wall-clock milliseconds, monotonic so NTP jumps do not skew request timing
-static unsigned long long mono_ms(void)
-{
-#ifdef _WIN32
-    return (unsigned long long)GetTickCount64();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long long)ts.tv_sec * 1000 +
-           (unsigned long long)ts.tv_nsec / 1000000;
-#endif
-}
-
 static void clf_timestamp(char *buf, size_t n)
 {
     time_t now = time(NULL);
@@ -131,9 +116,9 @@ void http_access_log_middleware(Http_Request *req, Http_Response *res,
                                 void *user_data,
                                 Http_Handler_Fn next, void *next_data)
 {
-    unsigned long long t0 = mono_ms();
+    unsigned long long t0 = time_mono_ms();
     next(req, res, next_data);
-    unsigned long long elapsed = mono_ms() - t0;
+    unsigned long long elapsed = time_mono_ms() - t0;
 
     Http_AccessLog_Opts *opts = user_data;
     FILE *f = (opts != NULL && opts->file != NULL) ? opts->file : stderr;

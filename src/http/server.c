@@ -2,16 +2,12 @@
 
 #include "server.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include <ctype.h>
 #include <signal.h>
 #include <string.h>
-#include <time.h>
 
 #include "buffer.h"
+#include "date.h"
 #include "http.h"
 #include "log.h"
 #include "net.h"
@@ -41,19 +37,6 @@ static void handle_signal(int sig)
 }
 
 static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
-
-// wall-clock milliseconds for request timing, monotonic so NTP jumps don't
-// skew the numbers
-static unsigned long long mono_ms(void)
-{
-#ifdef _WIN32
-    return (unsigned long long)GetTickCount64();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long long)ts.tv_sec * 1000 + (unsigned long long)ts.tv_nsec / 1000000;
-#endif
-}
 
 static void log_request(Http_Request *req, Http_Response *res, unsigned long long elapsed_ms)
 {
@@ -250,9 +233,9 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         bool is_head = req.method == HTTP_HEAD;
         Http_Response res;
         http_response_init(&res);
-        unsigned long long t0 = mono_ms();
+        unsigned long long t0 = time_mono_ms();
         handler(&req, &res, user_data);
-        unsigned long long elapsed = mono_ms() - t0;
+        unsigned long long elapsed = time_mono_ms() - t0;
         res.keep_alive = keep;
         log_request(&req, &res, elapsed);
         http_request_free(&req);

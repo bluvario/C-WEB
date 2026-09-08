@@ -17,4 +17,8 @@ char *http_date_now(char *buf, size_t bufsize);
 // the text is not a valid date of exactly that shape.
 time_t http_date_parse(String_View text);
 
+// millisecond ticks on a monotonic clock, for durations and timers. never
+// jumps backwards across NTP adjustments. windows uses GetTickCount64.
+unsigned long long time_mono_ms(void);
+
 #endif

@@ -2,8 +2,13 @@
 
 #include "date.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "sv.h"
 
@@ -93,4 +98,16 @@ time_t http_date_parse(String_View text)
     long secs = days_from_civil(y, (unsigned)month + 1, (unsigned)d) * 86400L;
     secs += (long)h * 3600 + (long)mi * 60 + s;
     return (time_t)secs;
+}
+
+unsigned long long time_mono_ms(void)
+{
+#ifdef _WIN32
+    return (unsigned long long)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000 +
+           (unsigned long long)ts.tv_nsec / 1000000;
+#endif
 }
