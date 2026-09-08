@@ -17,13 +17,9 @@ static String_View next_seg(String_View *s)
     return sv_chop_by_delim(s, '/');
 }
 
-bool route_match(Route_Def route, Http_Method method, String_View path, Str_Map *params)
+bool route_path_matches(const char *pattern, String_View path, Str_Map *params)
 {
-    if (route.method != method) {
-        return false;
-    }
-
-    String_View p = sv_from_cstr(route.pattern);
+    String_View p = sv_from_cstr(pattern);
     String_View q = path;
     for (;;) {
         String_View pseg = next_seg(&p);
@@ -44,4 +40,12 @@ bool route_match(Route_Def route, Http_Method method, String_View path, Str_Map 
             return false;
         }
     }
+}
+
+bool route_match(Route_Def route, Http_Method method, String_View path, Str_Map *params)
+{
+    if (route.method != method) {
+        return false;
+    }
+    return route_path_matches(route.pattern, path, params);
 }

@@ -41,6 +41,29 @@ int router_add(Http_Router *r, Http_Method method, const char *pattern,
     return 0;
 }
 
+// is name already one of the comma-separated tokens in allow[0..len-1]?
+static bool allow_has(const char *allow, size_t len, const char *name)
+{
+    size_t nlen = strlen(name);
+    size_t i = 0;
+    while (i < len) {
+        while (i < len && allow[i] == ' ') {
+            i++;
+        }
+        size_t start = i;
+        while (i < len && allow[i] != ',') {
+            i++;
+        }
+        if (i - start == nlen && strncmp(allow + start, name, nlen) == 0) {
+            return true;
+        }
+        if (i < len) {
+            i++; // hop the comma
+        }
+    }
+    return false;
+}
+
 void router_dispatch(Http_Request *req, Http_Response *res, void *user_data)
 {
     Http_Router *r = user_data;
@@ -57,19 +80,51 @@ void router_dispatch(Http_Request *req, Http_Response *res, void *user_data)
         return;
     }
 
+    // the path may exist under other methods: collect them for the Allow
+    // header (405) instead of answering 404
+    bool path_found = false;
+    char allow[128];
+    size_t allow_len = 0;
+
     for (size_t i = 0; i < r->count; i++) {
         Http_Route *route = &r->items[i];
+        bool method_matches = route->method == req->method;
 
-        if (route_match((Route_Def){route->method, route->pattern},
-                        req->method, req->path, &params)) {
-            route->handler(req, res, &params, route->user_data);
-            strmap_free(&params);
-            return; // first match wins
+        if (route_path_matches(route->pattern, req->path, method_matches ? &params : NULL)) {
+            if (method_matches) {
+                route->handler(req, res, &params, route->user_data);
+                strmap_free(&params);
+                return; // first match wins
+            }
+            path_found = true;
+            const char *name = http_method_name(route->method);
+            if (name == NULL) {
+                continue;
+            }
+            if (!allow_has(allow, allow_len, name)) {
+                size_t nlen = strlen(name);
+                if (allow_len > 0) {
+                    allow[allow_len++] = ',';
+                    allow[allow_len++] = ' ';
+                }
+                memcpy(allow + allow_len, name, nlen);
+                allow_len += nlen;
+                allow[allow_len] = '\0';
+            }
         }
     }
 
-    http_response_set_status(res, HTTP_404_NOT_FOUND);
-    http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
-    http_response_add_body_cstr(res, "404 not found");
+    if (path_found) {
+        http_response_set_status(res, HTTP_405_METHOD_NOT_ALLOWED);
+        http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
+        if (allow_len > 0) {
+            http_response_set_header(res, "Allow", allow);
+        }
+        http_response_add_body_cstr(res, "405 method not allowed");
+    } else {
+        http_response_set_status(res, HTTP_404_NOT_FOUND);
+        http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
+        http_response_add_body_cstr(res, "404 not found");
+    }
     strmap_free(&params);
 }

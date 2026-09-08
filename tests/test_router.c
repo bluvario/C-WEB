@@ -5,6 +5,7 @@
 #include "request.h"
 #include "response.h"
 #include "router.h"
+#include "strbuf.h"
 #include "sv.h"
 
 typedef struct {
@@ -152,14 +153,42 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
-    // method mismatch must not hit the GET route
+    // method mismatch must not hit the GET route: 405 with an Allow header
     http_request_parse(&req, sv_from_cstr("DELETE /users/99 HTTP/1.1\r\nHost: x\r\n\r\n"));
     http_response_init(&res);
     router_dispatch(&req, &res, &router);
-    if (res.status != HTTP_404_NOT_FOUND) {
-        fprintf(stderr, "method mismatch should be 404\n");
+    if (res.status != HTTP_405_METHOD_NOT_ALLOWED) {
+        fprintf(stderr, "method mismatch should be 405, got %d\n", (int)res.status);
         return 1;
     }
+    Strbuf wire;
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Allow: GET\r\n") == NULL) {
+        fprintf(stderr, "405 missing Allow header:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // /users is served by POST, so DELETE there lists only POST
+    http_request_parse(&req, sv_from_cstr("DELETE /users HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (res.status != HTTP_405_METHOD_NOT_ALLOWED) {
+        fprintf(stderr, "/users DELETE should be 405, got %d\n", (int)res.status);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Allow: POST\r\n") == NULL) {
+        fprintf(stderr, "/users 405 should list POST only:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
     http_response_free(&res);
     http_request_free(&req);
 
