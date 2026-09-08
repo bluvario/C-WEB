@@ -2,9 +2,9 @@ CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
 PREFIX  ?= /usr/local
 
-LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/utils/base64.c src/utils/buffer.c src/security/escape.c src/security/path.c src/http/http.c src/http/net.c src/http/request.c src/http/response.c src/http/server.c src/http/date.c src/http/params.c src/http/mime.c src/http/static.c src/routing/route.c src/routing/router.c
+LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/utils/base64.c src/utils/buffer.c src/security/escape.c src/security/path.c src/http/http.c src/http/net.c src/http/request.c src/http/response.c src/http/server.c src/http/date.c src/http/params.c src/http/mime.c src/http/static.c src/http/negotiate.c src/routing/route.c src/routing/router.c
 
-TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static
+TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate
 
 all: build/libcweb.a
 
