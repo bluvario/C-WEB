@@ -27,6 +27,25 @@ static int check(const char *what, int cond)
     return 0;
 }
 
+// strbuf payloads are not NUL-terminated, so strstr() would read past the
+// allocation; search within explicit bounds instead
+static int find_bytes(const char *hay, size_t hay_len, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (n == 0) {
+        return 1;
+    }
+    if (hay_len < n) {
+        return 0;
+    }
+    for (size_t i = 0; i + n <= hay_len; i++) {
+        if (memcmp(hay + i, needle, n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // echoes path, query, request body and whether the caller sent X-Custom
 static void echo_handler(Http_Request *req, Http_Response *res,
                          Str_Map *params, void *user_data)
@@ -86,6 +105,62 @@ static void close_handler(Http_Request *req, Http_Response *res,
     http_response_set_header(res, "Connection", "close");
 }
 
+static void final_handler(Http_Request *req, Http_Response *res,
+                          Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_add_body_cstr(res, "landed");
+}
+
+static void redir_handler(Http_Request *req, Http_Response *res,
+                          Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_redirect(res, HTTP_302_FOUND, "/final");
+}
+
+// a Location without a leading slash must still resolve against the base host
+static void relredir_handler(Http_Request *req, Http_Response *res,
+                             Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_redirect(res, HTTP_302_FOUND, "final");
+}
+
+// 307 keeps the method, 303 must downgrade to GET
+static void r307_handler(Http_Request *req, Http_Response *res,
+                         Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_redirect(res, HTTP_307_TEMPORARY_REDIRECT, "/echo");
+}
+
+static void r303_handler(Http_Request *req, Http_Response *res,
+                         Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_redirect(res, HTTP_303_SEE_OTHER, "/echo");
+}
+
+static void loop_handler(Http_Request *req, Http_Response *res,
+                         Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_redirect(res, HTTP_302_FOUND, "/loop");
+}
+
 int main(void)
 {
     int fails = 0;
@@ -106,6 +181,12 @@ int main(void)
     router_add(&router, HTTP_POST, "/echo", echo_handler, NULL);
     router_add(&router, HTTP_GET, "/chunks", chunk_handler, NULL);
     router_add(&router, HTTP_GET, "/close", close_handler, NULL);
+    router_add(&router, HTTP_GET, "/final", final_handler, NULL);
+    router_add(&router, HTTP_GET, "/redir", redir_handler, NULL);
+    router_add(&router, HTTP_GET, "/rel", relredir_handler, NULL);
+    router_add(&router, HTTP_GET, "/loop", loop_handler, NULL);
+    router_add(&router, HTTP_POST, "/r307", r307_handler, NULL);
+    router_add(&router, HTTP_POST, "/r303", r303_handler, NULL);
 
     pid_t child = fork();
     if (child == 0) {
@@ -130,7 +211,7 @@ int main(void)
                    r.body.count == strlen("echo:/echo|x=1||custom") &&
                    memcmp(r.body.items, "echo:/echo|x=1||custom", r.body.count) == 0);
     fails += check("GET headers kept",
-                   strstr(r.headers.items, "X-Echo: on\r\n") != NULL);
+                   find_bytes(r.headers.items, r.headers.count, "X-Echo: on\r\n"));
     http_client_result_free(&r);
 
     // POST body round-trips through the request parser
@@ -196,7 +277,7 @@ int main(void)
                    r.body.count == strlen("echo:/echo|x=1||none") &&
                    memcmp(r.body.items, "echo:/echo|x=1||none", r.body.count) == 0);
     fails += check("server offered keep-alive",
-                   strstr(r.headers.items, "Connection: keep-alive\r\n") != NULL);
+                   find_bytes(r.headers.items, r.headers.count, "Connection: keep-alive\r\n"));
     fails += check("connection kept open", http_client_keepalive_active(pc));
     http_client_result_free(&r);
 
@@ -247,6 +328,49 @@ int main(void)
                    http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
     fails += check("reopened exactly once", http_client_connection_opens(pc) == 3);
     http_client_result_free(&r);
+
+    // ---- redirects ----
+    fails += check("302 followed to final",
+                   http_client_req_get(pc, "/redir", &r) == 0 &&
+                   r.status == HTTP_200_OK && r.redirects == 1);
+    fails += check("redirect landing body",
+                   r.body.count == strlen("landed") &&
+                   memcmp(r.body.items, "landed", r.body.count) == 0);
+    http_client_result_free(&r);
+
+    fails += check("relative location resolves to base",
+                   http_client_req_get(pc, "/rel", &r) == 0 &&
+                   r.status == HTTP_200_OK);
+    http_client_result_free(&r);
+
+    fails += check("redirect loop capped at the default",
+                   http_client_req_get(pc, "/loop", &r) == 0 &&
+                   r.status == HTTP_302_FOUND && r.redirects == 5);
+    http_client_result_free(&r);
+
+    // 307 must carry the method and body through to the destination
+    fails += check("307 preserves POST",
+                   http_client_req_post(pc, "/r307", payload, &r) == 0 &&
+                   r.status == HTTP_200_OK && r.redirects == 1);
+    fails += check("307 body survived the hop",
+                   find_bytes(r.body.items, r.body.count, "hello-payload"));
+    http_client_result_free(&r);
+
+    // 303 lands on GET and never carries the original body
+    fails += check("303 downgrades POST to GET",
+                   http_client_req_post(pc, "/r303", payload, &r) == 0 &&
+                   r.status == HTTP_200_OK && r.redirects == 1);
+    fails += check("303 body dropped",
+                   !find_bytes(r.body.items, r.body.count, "hello-payload"));
+    http_client_result_free(&r);
+
+    // redirects are a client policy and can be switched off
+    http_client_set_redirects(pc, 0);
+    fails += check("redirects disabled returns the 302",
+                   http_client_req_get(pc, "/redir", &r) == 0 &&
+                   r.status == HTTP_302_FOUND && r.redirects == 0);
+    http_client_result_free(&r);
+    http_client_set_redirects(pc, 5);
 
     http_client_close(pc);
 

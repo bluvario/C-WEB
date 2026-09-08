@@ -124,23 +124,33 @@ static bool head_has_token(String_View head, const char *name, const char *token
     return false;
 }
 
-static long long head_content_length(String_View head)
+// first value of a header, trimmed, lowercased name lookup. false when absent.
+static bool head_get_value(String_View head, const char *name, String_View *value)
 {
+    size_t n = strlen(name);
     String_View rest = head;
     while (rest.count > 0) {
         String_View line = sv_trim_right(sv_chop_by_delim(&rest, '\n'));
         if (line.count == 0) {
             break;
         }
-        if (header_is(line, "content-length")) {
-            String_View value = sv_trim((String_View){line.data + strlen("content-length") + 1,
-                                                      line.count - strlen("content-length") - 1});
-            long long n;
-            if (sv_to_i64(value, &n) && n >= 0) {
-                return n;
-            }
-            return -1; // present but garbage, do not guess
+        if (header_is(line, name)) {
+            *value = sv_trim((String_View){line.data + n + 1, line.count - n - 1});
+            return true;
         }
+    }
+    return false;
+}
+
+static long long head_content_length(String_View head)
+{
+    String_View value;
+    if (head_get_value(head, "content-length", &value)) {
+        long long n;
+        if (sv_to_i64(value, &n) && n >= 0) {
+            return n;
+        }
+        return -1; // present but garbage, do not guess
     }
     return -1;
 }
@@ -308,6 +318,7 @@ struct Http_Client {
     int port;
     unsigned long timeout_ms;
     size_t opens; // TCP connections opened since birth, for diagnostics
+    int redirects; // 3xx hops to chase before giving up
     Strbuf rbuf;  // bytes already read waiting to be consumed
     size_t rstart; // how many of rbuf.count belong to a finished request
 };
@@ -317,6 +328,7 @@ Http_Client *http_client_open(const char *base_url)
     Http_Client *c = xcalloc(1, sizeof *c);
     c->sock = -1;
     c->timeout_ms = CLIENT_TIMEOUT_MS;
+    c->redirects = 5;
     strbuf_init(&c->rbuf);
     if (base_url != NULL) {
         Uri u;
@@ -361,6 +373,13 @@ int http_client_set_timeout(Http_Client *c, unsigned long ms)
     }
     c->timeout_ms = ms;
     return 0;
+}
+
+void http_client_set_redirects(Http_Client *c, int max_redirects)
+{
+    if (c != NULL) {
+        c->redirects = max_redirects < 0 ? 0 : max_redirects;
+    }
 }
 
 bool http_client_keepalive_active(const Http_Client *c)
@@ -744,6 +763,36 @@ static int do_request(Http_Client *c, const char *raw, Http_Method method,
     }
 }
 
+static bool redirect_code(Http_Status s)
+{
+    return s == HTTP_301_MOVED_PERMANENTLY || s == HTTP_302_FOUND ||
+           s == HTTP_303_SEE_OTHER || s == HTTP_307_TEMPORARY_REDIRECT ||
+           s == HTTP_308_PERMANENT_REDIRECT;
+}
+
+// turns a Location value into something resolve_target accepts: absolute URLs
+// and root-relative paths pass through, a bare relative path gets "/" prefixed
+// so it resolves against the client's base host
+static char *resolve_location(String_View location)
+{
+    char *out = xcalloc(location.count + 2, 1);
+    bool absolute = false;
+    for (size_t i = 0; i + 2 < location.count; i++) {
+        if (location.data[i] == ':' && location.data[i + 1] == '/' &&
+            location.data[i + 2] == '/') {
+            absolute = true;
+            break;
+        }
+    }
+    if (absolute || (location.count > 0 && location.data[0] == '/')) {
+        memcpy(out, location.data, location.count);
+    } else {
+        out[0] = '/';
+        memcpy(out + 1, location.data, location.count);
+    }
+    return out;
+}
+
 int http_client_req(Http_Client *c, const char *url_or_path, Http_Method method,
                     const char *extra_headers, String_View body,
                     Http_Client_Result *out)
@@ -751,7 +800,43 @@ int http_client_req(Http_Client *c, const char *url_or_path, Http_Method method,
     if (url_or_path == NULL || out == NULL) {
         return -1;
     }
-    return do_request(c, url_or_path, method, extra_headers, body, out);
+
+    int hops = 0;
+    char *owned = NULL;
+    for (;;) {
+        int rc = do_request(c, url_or_path, method, extra_headers, body, out);
+        if (rc != 0) {
+            xfree(owned);
+            return rc;
+        }
+        if (!redirect_code(out->status) || hops >= c->redirects) {
+            break;
+        }
+        String_View location;
+        if (!head_get_value((String_View){out->headers.items, out->headers.count},
+                            "location", &location) || location.count == 0) {
+            break; // a redirect with no Location goes nowhere
+        }
+
+        xfree(owned);
+        owned = resolve_location(location);
+        url_or_path = owned; // do_request keeps it through this call only
+        hops++;
+        // 303 always lands on a plain GET; 301/302 also downgrade a POST, the
+        // way browsers handle form submissions. 307/308 must keep the method
+        // and bytes so the destination can decide.
+        if (out->status == HTTP_303_SEE_OTHER ||
+            (out->status != HTTP_307_TEMPORARY_REDIRECT &&
+             out->status != HTTP_308_PERMANENT_REDIRECT && method == HTTP_POST)) {
+            method = HTTP_GET;
+            body = (String_View){0};
+        }
+        // the redirect response was read; the next hop replaces it wholesale
+        http_client_result_free(out);
+    }
+    xfree(owned);
+    out->redirects = hops;
+    return 0;
 }
 
 int http_client_req_get(Http_Client *c, const char *url_or_path, Http_Client_Result *out)

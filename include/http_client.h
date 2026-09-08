@@ -21,6 +21,7 @@ typedef struct {
     Strbuf headers;     // status line plus headers, raw "Name: value\r\n"
     Strbuf body;        // reassembled payload, chunked decoding already done
     char *error;        // owned reason, NULL when the exchange succeeded
+    int redirects;      // hops followed before this response arrived
 } Http_Client_Result;
 
 typedef struct Http_Client Http_Client;
@@ -32,6 +33,12 @@ void http_client_close(Http_Client *c);
 
 // how long a request may wait for data; 0 keeps the kernel default. 10000ms.
 int http_client_set_timeout(Http_Client *c, unsigned long ms);
+
+// how many 3xx redirects to chase (Location) before giving up and returning
+// the last redirect response. 0 disables following entirely; default 5.
+// 303 (and 301/302 after a POST) downgrade to GET with no body, per the
+// browser behavior most servers expect; 307/308 preserve method and body.
+void http_client_set_redirects(Http_Client *c, int max_redirects);
 
 // diagnostics for tests and load watchers
 bool http_client_keepalive_active(const Http_Client *c);
