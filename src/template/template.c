@@ -181,7 +181,13 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include \"session.h\"\n"
             "#include \"strmap.h\"\n"
             "#include \"strbuf.h\"\n"
-            "#include \"sv.h\"\n\n");
+            "#include \"sv.h\"\n"
+            "\n"
+            "// cweb build emits out/pages.h declaring every page, so a page\n"
+            "// can render another as a partial: <?c page_x(req,res,params,user_data); ?>\n"
+            "#if __has_include(\"pages.h\")\n"
+            "#include \"pages.h\"\n"
+            "#endif\n\n");
 
         if (used_out) {
             strbuf_append_cstr(out,

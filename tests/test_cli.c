@@ -104,6 +104,13 @@ int main(void)
     wfile(wbuf, "body { background: #fff; }");
     snprintf(wbuf, sizeof wbuf, "%s/404.c.html", views);
     wfile(wbuf, "<h1>Not found</h1>");
+    char partiald[1024];
+    snprintf(partiald, sizeof partiald, "%s/partials", views);
+    mkdir(partiald, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/partials/shout.c.html", views);
+    wfile(wbuf, "<strong>reusable!</strong>");
+    snprintf(wbuf, sizeof wbuf, "%s/mix.c.html", views);
+    wfile(wbuf, "<?c page_shout(req, res, params, user_data); ?><span>mixed page</span>");
 
     // build the views into C and a server binary, mounting the static dir
     snprintf(wbuf, sizeof wbuf, "%s build %s %s . %s >/dev/null", TOOL, views, out, staticd);
@@ -115,7 +122,8 @@ int main(void)
     // the generated artifacts line up with the views
     char path[2048];
     const char *names[] = {"page_hello.c", "page_index.c", "page_world.c",
-                           "page_404.c", "main.c", "server"};
+                           "page_404.c", "page_shout.c", "page_mix.c",
+                           "pages.h", "main.c", "server"};
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", out, names[i]);
         if (access(path, F_OK) != 0) {
@@ -135,26 +143,50 @@ int main(void)
     main[n] = '\0';
     fclose(f);
 
-    int routes_ok = strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
+    int routes_ok = strstr(main, "#include \"pages.h\"") != NULL &&
+                    strstr(main, "void page_hello(Http_Request") == NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_POST, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/mix\", page_mix, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_POST, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
                     strstr(main, "static void cweb_fallback(") != NULL &&
                     strstr(main, "http_serve_static(req, res, (void *)cweb_static_root);") != NULL &&
-                    strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") == NULL;
+                    strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") == NULL &&
+                    strstr(main, "page_shout, &cweb_sessions);") == NULL;
     free(main);
     if (!routes_ok) {
         fprintf(stderr, "generated main.c does not register the expected routes\n");
         return 1;
     }
 
+    // pages.h forwards handlers for pages and partials alike
+    snprintf(path, sizeof path, "%s/pages.h", out);
+    f = fopen(path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "missing pages.h\n");
+        return 1;
+    }
+    main = malloc(cap);
+    size_t pn = fread(main, 1, cap - 1, f);
+    main[pn] = '\0';
+    fclose(f);
+    int headers_ok = strstr(main, "#ifndef CWEB_PAGES_H") != NULL &&
+                     strstr(main, "void page_hello(Http_Request") != NULL &&
+                     strstr(main, "void page_shout(Http_Request") != NULL;
+    free(main);
+    if (!headers_ok) {
+        fprintf(stderr, "generated pages.h is incomplete\n");
+        return 1;
+    }
+
     // --routes lists them without binding a port
     snprintf(wbuf, sizeof wbuf, "%s/server --routes", out);
     FILE *pr = popen(wbuf, "r");
-    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0, has_404 = 0;
+    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0, has_404 = 0, has_mix = 0, has_shout = 0;
     if (pr != NULL) {
         char line[512];
         while (fgets(line, sizeof line, pr) != NULL) {
@@ -173,10 +205,16 @@ int main(void)
             if (strstr(line, "404: *") != NULL) {
                 has_404 = 1;
             }
+            if (strstr(line, "/mix") != NULL) {
+                has_mix = 1;
+            }
+            if (strstr(line, "/shout") != NULL) {
+                has_shout = 1;
+            }
         }
         pclose(pr);
     }
-    if (!has_hello || !has_index || !has_world || !has_static || !has_404) {
+    if (!has_hello || !has_index || !has_world || !has_static || !has_404 || !has_mix || has_shout) {
         fprintf(stderr, "--routes output incomplete\n");
         return 1;
     }
@@ -230,6 +268,15 @@ int main(void)
          strstr(body, "<h1>Index</h1>") != NULL;
     if (!ok) {
         fprintf(stderr, "GET /index failed:\n%s\n", body ? body : "(connect error)");
+    }
+    free(body);
+
+    body = fetch(port, "/mix");
+    ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
+         strstr(body, "<strong>reusable!</strong>") != NULL &&
+         strstr(body, "mixed page") != NULL;
+    if (!ok) {
+        fprintf(stderr, "GET /mix should render the partial inline:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 

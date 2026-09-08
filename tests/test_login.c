@@ -156,9 +156,18 @@ int main(void)
 
     resp = request(port, "GET", "/nowhere", NULL, NULL);
     ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 404") != NULL &&
-         strstr(resp, "text/html") != NULL && strstr(resp, "no such page") != NULL;
+         strstr(resp, "text/html") != NULL && strstr(resp, "no such page") != NULL &&
+         strstr(resp, "Powered by C-WEB") != NULL;
     if (!ok) {
         fprintf(stderr, "unknown paths should render the custom 404 page:\n%s\n", resp ? resp : "(connect error)");
+    }
+    free(resp);
+
+    resp = request(port, "GET", "/", NULL, NULL);
+    ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+         strstr(resp, "Powered by C-WEB") != NULL;
+    if (!ok) {
+        fprintf(stderr, "home page should include the footer partial:\n%s\n", resp ? resp : "(connect error)");
     }
     free(resp);
 
