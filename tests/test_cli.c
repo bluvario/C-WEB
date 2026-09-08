@@ -111,6 +111,12 @@ int main(void)
     wfile(wbuf, "<strong>reusable!</strong>");
     snprintf(wbuf, sizeof wbuf, "%s/mix.c.html", views);
     wfile(wbuf, "<?c page_shout(req, res, params, user_data); ?><span>mixed page</span>");
+    snprintf(wbuf, sizeof wbuf, "%s/layout.c.html", views);
+    wfile(wbuf,
+          "<!DOCTYPE html><html><head><title>L</title></head>"
+          "<body><nav>top</nav>"
+          "<?c cweb_tpl_layout_emit(res); ?>"
+          "<footer>bottom</footer></body></html>");
 
     // build the views into C and a server binary, mounting the static dir
     snprintf(wbuf, sizeof wbuf, "%s build %s %s . %s >/dev/null", TOOL, views, out, staticd);
@@ -123,7 +129,7 @@ int main(void)
     char path[2048];
     const char *names[] = {"page_hello.c", "page_index.c", "page_world.c",
                            "page_404.c", "page_shout.c", "page_mix.c",
-                           "pages.h", "main.c", "server"};
+                           "page_layout.c", "pages.h", "main.c", "server"};
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", out, names[i]);
         if (access(path, F_OK) != 0) {
@@ -146,19 +152,23 @@ int main(void)
     int routes_ok = strstr(main, "#include \"pages.h\"") != NULL &&
                     strstr(main, "#include \"rate_limit.h\"") != NULL &&
                     strstr(main, "#include \"security.h\"") != NULL &&
+                    strstr(main, "#include \"template.h\"") != NULL &&
+                    strstr(main, "cweb_tpl_capture_begin") != NULL &&
+                    strstr(main, "static void cweb_wrap_hello(") != NULL &&
+                    strstr(main, "static void cweb_wrap_fallback(") != NULL &&
                     strstr(main, "http_rate_limit_middleware") != NULL &&
                     strstr(main, "http_security_middleware") != NULL &&
                     strstr(main, "cweb_rate_key") != NULL &&
                     strstr(main, "--secure") != NULL &&
                     strstr(main, "void page_hello(Http_Request") == NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_POST, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/mix\", page_mix, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_POST, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/hello\", cweb_wrap_hello, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_POST, \"/hello\", cweb_wrap_hello, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", cweb_wrap_world, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/mix\", cweb_wrap_mix, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/index\", cweb_wrap_index, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/\", cweb_wrap_index, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"*\", cweb_wrap_fallback, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_POST, \"*\", cweb_wrap_fallback, &cweb_sessions);") != NULL &&
                     strstr(main, "static void cweb_fallback(") != NULL &&
                     strstr(main, "http_serve_static(req, res, (void *)cweb_static_root);") != NULL &&
                     strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") == NULL &&
@@ -182,7 +192,8 @@ int main(void)
     fclose(f);
     int headers_ok = strstr(main, "#ifndef CWEB_PAGES_H") != NULL &&
                      strstr(main, "void page_hello(Http_Request") != NULL &&
-                     strstr(main, "void page_shout(Http_Request") != NULL;
+                     strstr(main, "void page_shout(Http_Request") != NULL &&
+                     strstr(main, "void page_layout(Http_Request") != NULL;
     free(main);
     if (!headers_ok) {
         fprintf(stderr, "generated pages.h is incomplete\n");
@@ -192,7 +203,7 @@ int main(void)
     // --routes lists them without binding a port
     snprintf(wbuf, sizeof wbuf, "%s/server --routes", out);
     FILE *pr = popen(wbuf, "r");
-    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0, has_404 = 0, has_mix = 0, has_shout = 0;
+    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0, has_404 = 0, has_mix = 0, has_shout = 0, has_layout = 0;
     if (pr != NULL) {
         char line[512];
         while (fgets(line, sizeof line, pr) != NULL) {
@@ -217,11 +228,14 @@ int main(void)
             if (strstr(line, "/shout") != NULL) {
                 has_shout = 1;
             }
+            if (strstr(line, "/layout") != NULL) {
+                has_layout = 1;
+            }
         }
         pclose(pr);
     }
-    if (!has_hello || !has_index || !has_world || !has_static || !has_404 || !has_mix || has_shout) {
-        fprintf(stderr, "--routes output incomplete\n");
+    if (!has_hello || !has_index || !has_world || !has_static || !has_404 || !has_mix || has_shout || has_layout) {
+        fprintf(stderr, "--routes output incomplete (layout must not be routed)\n");
         return 1;
     }
 
@@ -247,50 +261,57 @@ int main(void)
     char *body;
     body = fetch(port, "/hello");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
-         strstr(body, "<h1>Hello</h1>") != NULL;
+         strstr(body, "<body><nav>top</nav><h1>Hello</h1>") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /hello failed:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /hello should be wrapped by the layout:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
     body = fetch(port, "/sub/world");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
-         strstr(body, "<p>sub world</p>") != NULL;
+         strstr(body, "<body><nav>top</nav><p>sub world</p>") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /sub/world failed:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /sub/world should be wrapped by the layout:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
     body = fetch(port, "/");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
-         strstr(body, "<h1>Index</h1>") != NULL;
+         strstr(body, "<body><nav>top</nav><h1>Index</h1>") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET / failed:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET / should be wrapped by the layout:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
     body = fetch(port, "/index");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
-         strstr(body, "<h1>Index</h1>") != NULL;
+         strstr(body, "<body><nav>top</nav><h1>Index</h1>") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /index failed:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /index should be wrapped by the layout:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
     body = fetch(port, "/mix");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
+         strstr(body, "<body><nav>top</nav>") != NULL &&
          strstr(body, "<strong>reusable!</strong>") != NULL &&
-         strstr(body, "mixed page") != NULL;
+         strstr(body, "mixed page") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /mix should render the partial inline:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /mix should render the partial inside the layout:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
     body = fetch(port, "/nope");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 404") != NULL &&
-         strstr(body, "<h1>Not found</h1>") != NULL;
+         strstr(body, "<body><nav>top</nav><h1>Not found</h1>") != NULL &&
+         strstr(body, "<footer>bottom</footer></body></html>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /nope should render the custom 404 page:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /nope should render the wrapped 404 page:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
@@ -315,7 +336,8 @@ int main(void)
         return 1;
     }
     const char *app_names[] = {"views/index.c.html", "views/404.c.html",
-                               "views/partials/footer.c.html", "static/style.css"};
+                               "views/layout.c.html", "views/partials/footer.c.html",
+                               "static/style.css"};
     for (size_t i = 0; i < sizeof app_names / sizeof app_names[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", app, app_names[i]);
         if (access(path, F_OK) != 0) {
@@ -360,6 +382,8 @@ int main(void)
     }
     char *app_body = fetch(app_port, "/");
     app_ok = app_ok && app_body != NULL && strstr(app_body, "HTTP/1.1 200 OK") != NULL &&
+             strstr(app_body, "<!DOCTYPE html>") != NULL &&
+             strstr(app_body, "<main>") != NULL &&
              strstr(app_body, "cweb app") != NULL &&
              strstr(app_body, "Powered by C-WEB") != NULL;
     if (!app_ok) {

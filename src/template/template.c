@@ -5,9 +5,50 @@
 #include <string.h>
 
 #include "file.h"
+#include "response.h"
 #include "strbuf.h"
 #include "sv.h"
 #include "xmem.h"
+
+// one capture buffer per worker thread: while a page renders into it, its
+// cweb_tpl_add writes are collected instead of going to the response, and the
+// wrapping layout reads them back. the buffer outlives each capture so the
+// layout can read the bytes after end() and the next begin() reuses storage.
+static _Thread_local int cap_active;
+static _Thread_local Strbuf cap_buf;
+
+void cweb_tpl_add(Http_Response *res, const void *data, size_t len)
+{
+    if (cap_active) {
+        strbuf_append(&cap_buf, data, len);
+    } else {
+        http_response_add_body(res, (String_View){(const char *)data, len});
+    }
+}
+
+void cweb_tpl_capture_begin(void)
+{
+    cap_active = 1;
+    if (cap_buf.items == NULL) {
+        strbuf_init(&cap_buf);
+    }
+    cap_buf.count = 0;
+}
+
+void cweb_tpl_capture_end(void)
+{
+    cap_active = 0;
+}
+
+String_View cweb_tpl_layout_body(void)
+{
+    return (String_View){cap_buf.items, cap_buf.count};
+}
+
+void cweb_tpl_layout_emit(Http_Response *res)
+{
+    cweb_tpl_add(res, cap_buf.items, cap_buf.count);
+}
 
 // a page's static text rides inside cweb_tpl_out() calls, escaped so it
 // survives the trip through a C string literal unharmed
@@ -182,6 +223,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include \"strmap.h\"\n"
             "#include \"strbuf.h\"\n"
             "#include \"sv.h\"\n"
+            "#include \"template.h\"\n"
             "\n"
             "// cweb build emits out/pages.h declaring every page, so a page\n"
             "// can render another as a partial: <?c page_x(req,res,params,user_data); ?>\n"
@@ -193,7 +235,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             strbuf_append_cstr(out,
                 "static void cweb_tpl_out(Http_Response *res, const char *s)\n"
                 "{\n"
-                "    http_response_add_body_cstr(res, s);\n"
+                "    cweb_tpl_add(res, s, strlen(s));\n"
                 "}\n\n");
         }
         if (used_escape) {
@@ -203,7 +245,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
                 "    Strbuf tmp;\n"
                 "    strbuf_init(&tmp);\n"
                 "    html_escape_into(&tmp, s);\n"
-                "    http_response_add_body(res, (String_View){tmp.items, tmp.count});\n"
+                "    cweb_tpl_add(res, tmp.items, tmp.count);\n"
                 "    strbuf_free(&tmp);\n"
                 "}\n\n");
         }

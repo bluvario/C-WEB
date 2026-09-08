@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "file.h"
+#include "response.h"
 #include "strbuf.h"
 #include "sv.h"
 #include "template.h"
@@ -99,6 +100,55 @@ int main(void)
 
     check("bad identifier rejected",
           cweb_template_to_c(sv_from_cstr("x"), "1bad", &out, &err) == -1);
+    strbuf_free(&out);
+    strbuf_init(&out);
+    strbuf_free(&err);
+    strbuf_init(&err);
+
+    // --- unit: the layout capture runtime ---
+    // plain writes go straight into the response...
+    Strbuf body;
+    strbuf_init(&body);
+    Http_Response res;
+    http_response_init(&res);
+    cweb_tpl_add(&res, "page ", 5);
+    check("uncaptured write reaches the response",
+          res.body.count == 5 && memcmp(res.body.items, "page ", 5) == 0);
+
+    // ...but a capture holds them back for the wrapper template
+    cweb_tpl_capture_begin();
+    cweb_tpl_add(&res, "one ", 4);
+    cweb_tpl_add(&res, "two", 3);
+    cweb_tpl_capture_end();
+    check("captured writes avoided the response",
+          res.body.count == 5 && memcmp(res.body.items, "page ", 5) == 0);
+    String_View cap = cweb_tpl_layout_body();
+    check("layout body holds the captured markup",
+          cap.count == 7 && memcmp(cap.data, "one two", 7) == 0);
+
+    // reusing the capture discards the previous span
+    cweb_tpl_capture_begin();
+    cweb_tpl_add(&res, "fresh", 5);
+    cweb_tpl_capture_end();
+    cap = cweb_tpl_layout_body();
+    check("next capture replaces the body",
+          cap.count == 5 && memcmp(cap.data, "fresh", 5) == 0);
+
+    // partials rendered mid-capture land in the capture too
+    cweb_tpl_capture_begin();
+    cweb_tpl_add(&res, "under ", 6);
+    cweb_tpl_add(&res, "wrap", 4);
+    cweb_tpl_capture_end();
+    cap = cweb_tpl_layout_body();
+    check("whole page flow is captured",
+          cap.count == 10 && memcmp(cap.data, "under wrap", 10) == 0);
+
+    // after the span closes, thread writes go to the response again
+    cweb_tpl_add(&res, " end", 4);
+    check("writes resume after capture",
+          res.body.count == 9 && memcmp(res.body.items, "page  end", 9) == 0);
+    http_response_free(&res);
+    strbuf_free(&body);
     strbuf_free(&out);
     strbuf_init(&out);
     strbuf_free(&err);
