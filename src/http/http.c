@@ -13,6 +13,7 @@ const char *http_status_reason(Http_Status status)
     case HTTP_204_NO_CONTENT: return "No Content";
     case HTTP_301_MOVED_PERMANENTLY: return "Moved Permanently";
     case HTTP_302_FOUND: return "Found";
+    case HTTP_303_SEE_OTHER: return "See Other";
     case HTTP_304_NOT_MODIFIED: return "Not Modified";
     case HTTP_307_TEMPORARY_REDIRECT: return "Temporary Redirect";
     case HTTP_308_PERMANENT_REDIRECT: return "Permanent Redirect";

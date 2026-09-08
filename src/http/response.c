@@ -41,6 +41,27 @@ void http_response_add_body_cstr(Http_Response *res, const char *text)
     strbuf_append_cstr(&res->body, text);
 }
 
+void http_response_redirect(Http_Response *res, Http_Status status, const char *location)
+{
+    switch (status) {
+        case HTTP_301_MOVED_PERMANENTLY:
+        case HTTP_302_FOUND:
+        case HTTP_303_SEE_OTHER:
+        case HTTP_307_TEMPORARY_REDIRECT:
+        case HTTP_308_PERMANENT_REDIRECT:
+            break;
+        default:
+            status = HTTP_302_FOUND;
+    }
+
+    http_response_set_status(res, status);
+    http_response_set_header(res, "Location", location);
+    http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
+    http_response_add_body_cstr(res, "redirecting to ");
+    http_response_add_body_cstr(res, location);
+    http_response_add_body_cstr(res, "\n");
+}
+
 void http_response_serialize(Http_Response *res, Strbuf *out)
 {
     // responses in these statuses carry no body per RFC 9110

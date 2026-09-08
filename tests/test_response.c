@@ -55,6 +55,32 @@ int main(void)
     http_response_free(&res);
     strbuf_free(&wire);
 
+    // redirect wires up Location, a body and the right status line
+    http_response_init(&res);
+    http_response_redirect(&res, HTTP_302_FOUND, "/login");
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    const char *expect302 =
+        "HTTP/1.1 302 Found\r\n"
+        "Location: /login\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "Content-Length: 22\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "redirecting to /login\n";
+    fails += check("302 wire format", strcmp(wire.items, expect302) == 0);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
+    // a bogus status quietly becomes 302
+    http_response_init(&res);
+    http_response_redirect(&res, HTTP_200_OK, "/home");
+    fails += check("bogus redirect status coerced to 302", res.status == HTTP_302_FOUND);
+    fails += check("redirect keeps Location header",
+                   strstr(res.headers.items, "Location: /home\r\n") != NULL);
+    http_response_free(&res);
+
     if (fails == 0) {
         printf("response ok\n");
     }
