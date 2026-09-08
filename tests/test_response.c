@@ -29,29 +29,62 @@ int main(void)
     http_response_serialize(&res, &wire);
     if (strbuf_null_terminate(&wire) != 0) return 1;
 
-    const char *expect =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: 5\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "hello";
-    fails += check("200 response wire format", strcmp(wire.items, expect) == 0);
+    if (strncmp(wire.items, "HTTP/1.1 200 OK\r\n", 17) != 0 ||
+        strstr(wire.items, "Content-Type: text/html\r\n") == NULL ||
+        strstr(wire.items, "Content-Length: 5\r\n") == NULL ||
+        strstr(wire.items, "Connection: close\r\n") == NULL ||
+        strstr(wire.items, "\r\n\r\nhello") == NULL) {
+        fprintf(stderr, "200 wire format wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("200 response wire format", 1);
+
+    // serialized responses carry a usable RFC 7231 Date stamp in IMF-fixdate
+    // shape: "Tue, 08 Sep 2026 12:49:36 GMT"
+    const char *date = strstr(wire.items, "Date: ");
+    if (date == NULL) {
+        fprintf(stderr, "Date header missing:\n%s\n", wire.items);
+        return 1;
+    }
+    const char *date_val = date + 6;
+    // 29 chars of RFC 1123 date, trailing " GMT" begins at offset 25
+    const char *gmt = strstr(date_val, " GMT\r\n");
+    if (gmt == NULL || gmt - date_val != 25) {
+        fprintf(stderr, "Date header malformed: %s\n", date);
+        return 1;
+    }
+    fails += check("Date header present and well-formed", 1);
     http_response_free(&res);
     strbuf_free(&wire);
 
-    // 204 must not carry a body or Content-Length
+    // 204 must not carry a body or Content-Length, but still gets a Date
     http_response_init(&res);
     http_response_set_status(&res, HTTP_204_NO_CONTENT);
     http_response_add_body_cstr(&res, "must not appear");
     strbuf_init(&wire);
     http_response_serialize(&res, &wire);
     if (strbuf_null_terminate(&wire) != 0) return 1;
-    const char *expect204 =
-        "HTTP/1.1 204 No Content\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    fails += check("204 wire format", strcmp(wire.items, expect204) == 0);
+    if (strncmp(wire.items, "HTTP/1.1 204 No Content\r\n", 25) != 0 ||
+        strstr(wire.items, "Content-Length:") != NULL ||
+        strstr(wire.items, "must not appear") != NULL ||
+        strstr(wire.items, "Connection: close\r\n") == NULL ||
+        strstr(wire.items, "\r\nDate: ") == NULL) {
+        fprintf(stderr, "204 wire format wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("204 wire format", 1);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
+    // a handler that provides its own Date wins over the automatic one
+    http_response_init(&res);
+    http_response_set_header(&res, "Date", "Thu, 01 Jan 1970 00:00:00 GMT");
+    http_response_add_body_cstr(&res, "x");
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    fails += check("handler Date kept", strstr(wire.items, "Date: Thu, 01 Jan 1970 00:00:00 GMT\r\n") != NULL);
+    fails += check("handler Date not duplicated", strstr(wire.items, "Date: Thu, 01 Jan 1970 00:00:00 GMT\r\nDate: ") == NULL);
     http_response_free(&res);
     strbuf_free(&wire);
 
@@ -61,15 +94,15 @@ int main(void)
     strbuf_init(&wire);
     http_response_serialize(&res, &wire);
     if (strbuf_null_terminate(&wire) != 0) return 1;
-    const char *expect302 =
-        "HTTP/1.1 302 Found\r\n"
-        "Location: /login\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "Content-Length: 22\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "redirecting to /login\n";
-    fails += check("302 wire format", strcmp(wire.items, expect302) == 0);
+    if (strncmp(wire.items, "HTTP/1.1 302 Found\r\n", 20) != 0 ||
+        strstr(wire.items, "Location: /login\r\n") == NULL ||
+        strstr(wire.items, "Content-Type: text/plain; charset=utf-8\r\n") == NULL ||
+        strstr(wire.items, "Content-Length: 22\r\n") == NULL ||
+        strstr(wire.items, "redirecting to /login\n") == NULL) {
+        fprintf(stderr, "302 wire format wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("302 wire format", 1);
     http_response_free(&res);
     strbuf_free(&wire);
 

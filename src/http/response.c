@@ -1,7 +1,11 @@
 #include "response.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 
+#include "date.h"
 #include "http.h"
 #include "strbuf.h"
 
@@ -84,6 +88,38 @@ void http_response_set_cors_allow(Http_Response *res, const char *methods,
     }
 }
 
+// did the handler already stamp a Date header? headers are raw "Name: value"
+// text and can repeat, so every line gets a look, case-insensitively.
+static bool has_header(Http_Response *res, const char *name)
+{
+    size_t n = strlen(name);
+    const char *p = res->headers.items;
+    const char *end = p + res->headers.count;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        const char *colon = memchr(p, ':', len);
+        size_t klen = colon ? (size_t)(colon - p) : len;
+        if (klen == n) {
+            bool same = true;
+            for (size_t i = 0; i < n; i++) {
+                if (toupper((unsigned char)p[i]) != toupper((unsigned char)name[i])) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    return false;
+}
+
 void http_response_serialize(Http_Response *res, Strbuf *out)
 {
     // responses in these statuses carry no body per RFC 9110
@@ -102,6 +138,16 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
         char cl[64];
         snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", res->body.count);
         strbuf_append_cstr(out, cl);
+    }
+
+    // RFC 9110: an origin server must date-stamp basic responses so clients
+    // and caches can judge freshness; a handler's own Date header wins
+    if (!has_header(res, "date")) {
+        char d[64];
+        http_date_rfc7231(time(NULL), d, sizeof(d));
+        strbuf_append_cstr(out, "Date: ");
+        strbuf_append_cstr(out, d);
+        strbuf_append_cstr(out, "\r\n");
     }
     strbuf_append_cstr(out, res->keep_alive ? "Connection: keep-alive\r\n"
                                              : "Connection: close\r\n");
