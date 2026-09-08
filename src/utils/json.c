@@ -618,3 +618,124 @@ void json_object_set(Json_Value *obj, const char *key, Json_Value child)
     }
     da_append(&obj->as.object, pair);
 }
+
+// --- serialization ----------------------------------------------------------
+
+static void ser_string(Strbuf *out, const char *s)
+{
+    strbuf_append_char(out, '"');
+    const unsigned char *p = (const unsigned char *)s;
+    for (; *p != '\0'; p++) {
+        switch (*p) {
+            case '"':
+                strbuf_append_cstr(out, "\\\"");
+                break;
+            case '\\':
+                strbuf_append_cstr(out, "\\\\");
+                break;
+            case '\b':
+                strbuf_append_cstr(out, "\\b");
+                break;
+            case '\f':
+                strbuf_append_cstr(out, "\\f");
+                break;
+            case '\n':
+                strbuf_append_cstr(out, "\\n");
+                break;
+            case '\r':
+                strbuf_append_cstr(out, "\\r");
+                break;
+            case '\t':
+                strbuf_append_cstr(out, "\\t");
+                break;
+            default:
+                if (*p < 0x20) {
+                    char esc[8];
+                    int n = snprintf(esc, sizeof(esc), "\\u%04x", (unsigned)*p);
+                    strbuf_append(out, esc, (size_t)n);
+                } else {
+                    strbuf_append_char(out, (char)*p);
+                }
+                break;
+        }
+    }
+    strbuf_append_char(out, '"');
+}
+
+static void indent(Strbuf *out, int depth, int spaces)
+{
+    strbuf_append_char(out, '\n');
+    for (int i = 0; i < depth * spaces; i++) {
+        strbuf_append_char(out, ' ');
+    }
+}
+
+static void ser(const Json_Value *v, Strbuf *out, int depth, int spaces)
+{
+    bool pretty = spaces > 0;
+    switch (v->type) {
+        case JSON_NULL:
+            strbuf_append_cstr(out, "null");
+            break;
+        case JSON_BOOL:
+            strbuf_append_cstr(out, v->as.boolean ? "true" : "false");
+            break;
+        case JSON_NUMBER: {
+            char buf[64];
+            // plenty of digits: JSON numbers must survive strtod round trips
+            snprintf(buf, sizeof(buf), "%.17g", v->as.number);
+            strbuf_append_cstr(out, buf);
+            break;
+        }
+        case JSON_STRING:
+            ser_string(out, v->as.string);
+            break;
+        case JSON_ARRAY:
+            strbuf_append_char(out, '[');
+            for (size_t i = 0; i < v->as.array.count; i++) {
+                if (i > 0) {
+                    strbuf_append_char(out, ',');
+                }
+                if (pretty) {
+                    indent(out, depth + 1, spaces);
+                }
+                ser(&v->as.array.items[i], out, depth + 1, spaces);
+            }
+            if (pretty && v->as.array.count > 0) {
+                indent(out, depth, spaces);
+            }
+            strbuf_append_char(out, ']');
+            break;
+        case JSON_OBJECT:
+            strbuf_append_char(out, '{');
+            for (size_t i = 0; i < v->as.object.count; i++) {
+                if (i > 0) {
+                    strbuf_append_char(out, ',');
+                }
+                if (pretty) {
+                    indent(out, depth + 1, spaces);
+                }
+                ser_string(out, v->as.object.items[i].key);
+                strbuf_append_cstr(out, pretty ? ": " : ":");
+                ser(&v->as.object.items[i].value, out, depth + 1, spaces);
+            }
+            if (pretty && v->as.object.count > 0) {
+                indent(out, depth, spaces);
+            }
+            strbuf_append_char(out, '}');
+            break;
+    }
+}
+
+void json_serialize(const Json_Value *v, Strbuf *out)
+{
+    ser(v, out, 0, 0);
+}
+
+void json_serialize_pretty(const Json_Value *v, Strbuf *out, int spaces)
+{
+    if (spaces < 1) {
+        spaces = 1;
+    }
+    ser(v, out, 0, spaces);
+}

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "strbuf.h"
 #include "sv.h"
 
 // JSON value tree. nodes own their memory: a string owns its bytes, arrays
@@ -74,5 +75,11 @@ Json_Value json_make_array(void);
 Json_Value json_make_object(void);
 void json_array_append(Json_Value *arr, Json_Value child);
 void json_object_set(Json_Value *obj, const char *key, Json_Value child);
+
+// render a tree back to JSON text. compact for the wire, pretty with the
+// given indent width for humans. escapes quotes, backslashes and control
+// characters; numbers go out with enough digits to survive a round trip.
+void json_serialize(const Json_Value *v, Strbuf *out);
+void json_serialize_pretty(const Json_Value *v, Strbuf *out, int spaces);
 
 #endif

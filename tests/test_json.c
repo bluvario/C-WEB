@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "strbuf.h"
 #include "sv.h"
 #include "xmem.h"
 
@@ -38,6 +39,46 @@ static int parse_fails(const char *text)
     }
     xfree(pr.error);
     return ok;
+}
+
+static int json_equal(const Json_Value *a, const Json_Value *b)
+{
+    if (a->type != b->type) {
+        return 0;
+    }
+    switch (a->type) {
+        case JSON_NULL:
+            return 1;
+        case JSON_BOOL:
+            return a->as.boolean == b->as.boolean;
+        case JSON_NUMBER:
+            return a->as.number == b->as.number;
+        case JSON_STRING:
+            return strcmp(a->as.string, b->as.string) == 0;
+        case JSON_ARRAY:
+            if (a->as.array.count != b->as.array.count) {
+                return 0;
+            }
+            for (size_t i = 0; i < a->as.array.count; i++) {
+                if (!json_equal(&a->as.array.items[i], &b->as.array.items[i])) {
+                    return 0;
+                }
+            }
+            return 1;
+        case JSON_OBJECT:
+            if (a->as.object.count != b->as.object.count) {
+                return 0;
+            }
+            for (size_t i = 0; i < a->as.object.count; i++) {
+                const Json_Value *other = json_get(b, a->as.object.items[i].key);
+                if (other == NULL ||
+                    !json_equal(&a->as.object.items[i].value, other)) {
+                    return 0;
+                }
+            }
+            return 1;
+    }
+    return 0;
 }
 
 int main(void)
@@ -138,6 +179,65 @@ int main(void)
     json_object_set(&user, "id", json_make_number(9));
     fails += check("builder overwrite", json_get_number(&user, "id") == 9.0);
     json_free_value(&user);
+
+    // serialization: compact bytes are pinned exactly
+    Json_Value doc = json_make_object();
+    json_object_set(&doc, "name", json_make_string("a\"b\\c\nd e"));
+    Json_Value nums = json_make_array();
+    json_array_append(&nums, json_make_number(0));
+    json_array_append(&nums, json_make_number(4.5));
+    json_array_append(&nums, json_make_number(-7));
+    json_array_append(&nums, json_make_number(0.25));
+    json_object_set(&doc, "nums", nums);
+    json_object_set(&doc, "on", json_make_bool(true));
+    json_object_set(&doc, "off", json_make_bool(false));
+    json_object_set(&doc, "nil", json_make_null());
+    json_object_set(&doc, "empty", json_make_array());
+
+    Strbuf wire;
+    strbuf_init(&wire);
+    json_serialize(&doc, &wire);
+    strbuf_null_terminate(&wire);
+    const char *want = "{\"name\":\"a\\\"b\\\\c\\nd e\","
+                       "\"nums\":[0,4.5,-7,0.25],"
+                       "\"on\":true,\"off\":false,\"nil\":null,\"empty\":[]}";
+    fails += check("compact serialize pinned", strcmp(wire.items, want) == 0);
+    if (strcmp(wire.items, want) != 0) {
+        fprintf(stderr, "got  %s\nwant %s\n", wire.items, want);
+    }
+
+    // pretty serialize stays the same tree when re-parsed
+    strbuf_free(&wire);
+    strbuf_init(&wire);
+    json_serialize_pretty(&doc, &wire, 2);
+    strbuf_null_terminate(&wire);
+    fails += check("pretty serialize prints newlines", strstr(wire.items, "\n  \"name\":") != NULL);
+    if (strstr(wire.items, "\n  \"name\":") == NULL) {
+        fprintf(stderr, "pretty output:\n%s\n", wire.items);
+    }
+    Json_Parse_Result reparsed = json_parse(sv_from_cstr(wire.items));
+    fails += check("pretty output reparses", reparsed.error == NULL);
+    if (reparsed.error == NULL) {
+        fails += check("reparse equals original", json_equal(&doc, &reparsed.root));
+        json_free_value(&reparsed.root);
+    } else {
+        xfree(reparsed.error);
+    }
+    strbuf_free(&wire);
+    json_free_value(&doc);
+
+    // a parsed document serializes back to equivalent text
+    Json_Parse_Result rt = json_parse(sv_from_cstr("{\"x\":[1,2.5],\"y\":\"\\n\"}"));
+    strbuf_init(&wire);
+    json_serialize(&rt.root, &wire);
+    strbuf_null_terminate(&wire);
+    fails += check("parse->serialize round trip",
+                   strcmp(wire.items, "{\"x\":[1,2.5],\"y\":\"\\n\"}") == 0);
+    if (strcmp(wire.items, "{\"x\":[1,2.5],\"y\":\"\\n\"}") != 0) {
+        fprintf(stderr, "round trip got %s\n", wire.items);
+    }
+    strbuf_free(&wire);
+    json_free_value(&rt.root);
 
     if (fails == 0) {
         printf("json ok\n");
