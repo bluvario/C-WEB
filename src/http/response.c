@@ -64,6 +64,26 @@ void http_response_redirect(Http_Response *res, Http_Status status, const char *
     http_response_add_body_cstr(res, "\n");
 }
 
+void http_response_set_cors(Http_Response *res, const char *origin)
+{
+    http_response_set_header(res, "Access-Control-Allow-Origin", origin);
+    http_response_set_header(res, "Vary", "Origin");
+}
+
+void http_response_set_cors_allow(Http_Response *res, const char *methods,
+                                  const char *request_headers, long max_age_seconds)
+{
+    http_response_set_header(res, "Access-Control-Allow-Methods", methods);
+    if (request_headers != NULL) {
+        http_response_set_header(res, "Access-Control-Allow-Headers", request_headers);
+    }
+    if (max_age_seconds > 0) {
+        char age[32];
+        snprintf(age, sizeof(age), "%ld", max_age_seconds);
+        http_response_set_header(res, "Access-Control-Max-Age", age);
+    }
+}
+
 void http_response_serialize(Http_Response *res, Strbuf *out)
 {
     // responses in these statuses carry no body per RFC 9110

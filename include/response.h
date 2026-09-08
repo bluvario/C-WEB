@@ -31,6 +31,15 @@ void http_response_add_body_cstr(Http_Response *res, const char *text);
 // anything else quietly becomes a 302.
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location);
 
+// allows browser JavaScript from *origin to read this response ("*" opens it
+// to any origin without credentials). also marks it with Vary: Origin so
+// shared caches can keep the variants apart.
+void http_response_set_cors(Http_Response *res, const char *origin);
+// answers a preflight: which methods and request headers the resource is
+// willing to run, and how long the answer may be cached (0 = no Max-Age).
+void http_response_set_cors_allow(Http_Response *res, const char *methods,
+                                  const char *request_headers, long max_age_seconds);
+
 // writes the full HTTP/1.1 message (status line, headers, computed
 // Content-Length, blank line, body) to *out. statuses without a body
 // (204, 304) skip Content-Length and the body.
