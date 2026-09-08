@@ -14,6 +14,8 @@ void http_response_init(Http_Response *res)
     res->status = HTTP_200_OK;
     res->suppress_body = false;
     res->keep_alive = false;
+    res->stream_fn = NULL;
+    res->stream_user = NULL;
     strbuf_init(&res->headers);
     strbuf_init(&res->body);
 }
@@ -45,6 +47,15 @@ void http_response_add_body(Http_Response *res, String_View data)
 void http_response_add_body_cstr(Http_Response *res, const char *text)
 {
     strbuf_append_cstr(&res->body, text);
+}
+
+void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_data)
+{
+    res->stream_fn = fn;
+    res->stream_user = user_data;
+    strbuf_free(&res->body);
+    strbuf_init(&res->body);
+    res->suppress_body = false;
 }
 
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location)
@@ -120,7 +131,10 @@ static bool has_header(Http_Response *res, const char *name)
     return false;
 }
 
-void http_response_serialize(Http_Response *res, Strbuf *out)
+// writes the HTTP/1.1 message head (status line and headers). streamed
+// responses advertise transfer-encoding: chunked and carry no body here; the
+// server writes individual chunks afterwards.
+void http_response_serialize_head(Http_Response *res, Strbuf *out)
 {
     // responses in these statuses carry no body per RFC 9110
     bool status_has_no_body = res->status == HTTP_204_NO_CONTENT || res->status == HTTP_304_NOT_MODIFIED;
@@ -132,12 +146,18 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
 
     strbuf_append(out, res->headers.items, res->headers.count);
 
-    // a HEAD reply advertises the body it would have sent as Content-Length
-    // but carries none of the bytes, so suppress_body leaves body.count intact
+    bool streaming = res->stream_fn != NULL;
     if (!status_has_no_body) {
-        char cl[64];
-        snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", res->body.count);
-        strbuf_append_cstr(out, cl);
+        if (streaming) {
+            strbuf_append_cstr(out, "Transfer-Encoding: chunked\r\n");
+        } else {
+            // a HEAD reply advertises the body it would have sent as
+            // Content-Length but carries none of the bytes, so suppress_body
+            // leaves body.count intact
+            char cl[64];
+            snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", res->body.count);
+            strbuf_append_cstr(out, cl);
+        }
     }
 
     // RFC 9110: an origin server must date-stamp basic responses so clients
@@ -153,6 +173,22 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
                                              : "Connection: close\r\n");
     strbuf_append_cstr(out, "\r\n");
 
+    if (!status_has_no_body && !res->suppress_body && res->stream_fn == NULL) {
+        strbuf_append(out, res->body.items, res->body.count);
+    }
+}
+
+void http_response_serialize(Http_Response *res, Strbuf *out)
+{
+    http_response_serialize_head(res, out);
+    // streamed responses keep their body out of the buffer; the server writes
+    // it chunk by chunk straight to the socket
+    if (res->stream_fn != NULL) {
+        return;
+    }
+    // responses in these statuses carry no body per RFC 9110 (head already
+    // omitted their Content-Length)
+    bool status_has_no_body = res->status == HTTP_204_NO_CONTENT || res->status == HTTP_304_NOT_MODIFIED;
     if (!status_has_no_body && !res->suppress_body) {
         strbuf_append(out, res->body.items, res->body.count);
     }

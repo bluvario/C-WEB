@@ -5,6 +5,12 @@
 #include "strbuf.h"
 #include "sv.h"
 
+// streamed body source. fill buf with up to cap bytes and return how many,
+// or 0 once the stream is done. runs on the connection's worker after the
+// headers have been sent; never touch the socket, the server frames the
+// chunks for you.
+typedef size_t (*Http_Stream_Fn)(void *buf, size_t cap, void *user_data);
+
 // in-memory response, assembled piece by piece then serialized. header and
 // body buffers are owned, free the response when done with it.
 typedef struct {
@@ -13,6 +19,8 @@ typedef struct {
     Strbuf body;    // the actual payload; HEAD requests keep it for length
     bool suppress_body; // serialize headers but emit no body bytes
     bool keep_alive; // advertise Connection: keep-alive instead of close
+    Http_Stream_Fn stream_fn; // when set the body is chunked and streamed
+    void *stream_user;
 } Http_Response;
 
 void http_response_init(Http_Response *res);
@@ -25,6 +33,11 @@ void http_response_set_header(Http_Response *res, const char *name, const char *
 
 void http_response_add_body(Http_Response *res, String_View data);
 void http_response_add_body_cstr(Http_Response *res, const char *text);
+
+// switches the response to transfer-encoding: chunked with fn as the source
+// of body bytes. any buffered body is dropped: a response is either streamed
+// or assembled, not both.
+void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_data);
 
 // turns the response into a redirect: sets Location, a tiny plain-text body
 // and the given status. only 301/302/303/307/308 are valid redirect codes,

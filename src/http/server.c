@@ -65,6 +65,35 @@ static void send_wire(Socket_Handle client, Http_Response *res)
     strbuf_free(&wire);
 }
 
+// streams the response body in chunked framing: the head is serialized like
+// any other response (with Transfer-Encoding: chunked), then the callback is
+// drained into wire-sized frames until it reports the stream over. a raw
+// "0\r\n\r\n" balance frame closes it. for HEAD the metadata is delivered but
+// the chunked body is not, mirroring what a GET with a body would send.
+static void send_stream(Socket_Handle client, Http_Response *res, bool send_body)
+{
+    send_wire(client, res); // head only: serialize skips the stream body
+    if (!send_body) {
+        return;
+    }
+    char chunk[8192];
+    for (;;) {
+        size_t n = res->stream_fn(chunk, sizeof(chunk), res->stream_user);
+        if (n == 0) {
+            break;
+        }
+        if (n > sizeof(chunk)) {
+            break; // corrupt producer, stop rather than buffer forever
+        }
+        char size_line[32];
+        int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", n);
+        net_send_all(client, size_line, (size_t)sl);
+        net_send_all(client, chunk, n);
+        net_send_all(client, "\r\n", 2);
+    }
+    net_send_all(client, "0\r\n\r\n", 5);
+}
+
 static void send_error(Socket_Handle client, Http_Status status)
 {
     Http_Response res;
@@ -206,6 +235,7 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         }
 
         bool keep = conn_keep_alive(&req);
+        bool is_head = req.method == HTTP_HEAD;
         Http_Response res;
         http_response_init(&res);
         unsigned long long t0 = mono_ms();
@@ -215,7 +245,11 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         log_request(&req, &res, elapsed);
         http_request_free(&req);
 
-        send_wire(client, &res);
+        if (res.stream_fn != NULL) {
+            send_stream(client, &res, !is_head);
+        } else {
+            send_wire(client, &res);
+        }
         http_response_free(&res);
 
         rb_discard(&rb, consumed);
