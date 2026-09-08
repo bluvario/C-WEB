@@ -429,6 +429,61 @@ int main(void)
         return 1;
     }
 
+    // --- cweb serve forwards FLAGS... to the generated server ---
+    // a non-watch serve forks the CLI which execs the server; served with
+    // --rate 2 --secure the first budget of requests must pass hardened and
+    // anything beyond must come back 429, also hardened
+    char sf[1024], ss[1024];
+    snprintf(sf, sizeof sf, "%s/sf", tmp);
+    mkdir(sf, 0755);
+    snprintf(ss, sizeof ss, "%s/ss", tmp);
+    mkdir(ss, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", sf);
+    wfile(wbuf, "<h1>served</h1>");
+    probe = net_listen(0);
+    int s_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", s_port);
+    pid_t s_child = fork();
+    if (s_child == 0) {
+        execl(TOOL, "cweb", "serve", sf, port_arg, ".", ss, "--rate", "2",
+              "--secure", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(s_port) != 0) {
+        fprintf(stderr, "serve --rate --secure did not come up on port %d\n", s_port);
+        kill(s_child, SIGTERM);
+        waitpid(s_child, NULL, 0);
+        return 1;
+    }
+    int s_ok = 0, s_ok_secure = 0, s_429 = 0, s_429_secure = 0;
+    for (int i = 0; i < 10; i++) {
+        char *s_body = fetch(s_port, "/");
+        if (s_body == NULL) {
+            continue;
+        }
+        int hard = strstr(s_body, "X-Content-Type-Options: nosniff") != NULL &&
+                   strstr(s_body, "X-Frame-Options: DENY") != NULL;
+        if (strstr(s_body, "HTTP/1.1 200 OK") != NULL &&
+            strstr(s_body, "<h1>served</h1>") != NULL) {
+            s_ok++;
+            s_ok_secure += hard;
+        } else if (strstr(s_body, "429") != NULL) {
+            s_429++;
+            s_429_secure += hard;
+        }
+        free(s_body);
+    }
+    kill(s_child, SIGTERM);
+    waitpid(s_child, NULL, 0);
+    if (s_ok_secure < 1 || s_429_secure < 1 || s_429 < 5) {
+        fprintf(stderr,
+                "cweb serve must pass FLAGS through (got %d ok/%d hardened, "
+                "%d rate-limited/%d hardened)\n",
+                s_ok, s_ok_secure, s_429, s_429_secure);
+        return 1;
+    }
+
     // --- cweb serve --watch rebuilds and restarts on change ---
     char wv[1024], ws[1024];
     snprintf(wv, sizeof wv, "%s/wv", tmp);

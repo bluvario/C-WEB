@@ -811,20 +811,42 @@ static intmax_t watch_snapshot(const char *views_arg, const char *static_arg)
     return best;
 }
 
-static pid_t spawn_server(const char *scratch, const char *port)
+// the generated server's argv: fixed "--port" pairs plus whatever flags the
+// user tacked on after the positional arguments, passed through verbatim so
+// cweb serve and the built binary honor the same options
+static void server_argv(char *av[12], const char *port, char **extra, int nextra)
+{
+    int n = 0;
+    av[n++] = (char *)"server";
+    av[n++] = (char *)"--port";
+    av[n++] = (char *)port;
+    for (int i = 0; i < nextra && n < 11; i++) {
+        av[n++] = extra[i];
+    }
+    av[n] = NULL;
+}
+
+static pid_t spawn_server(const char *scratch, const char *port,
+                          char **extra, int nextra)
 {
     char bin_path[512];
     snprintf(bin_path, sizeof bin_path, "%s/server", scratch);
+    char *av[12];
+    server_argv(av, port, extra, nextra);
     pid_t pid = fork();
     if (pid < 0) {
         return -1;
     }
     if (pid == 0) {
-        execl(bin_path, "server", "--port", port, NULL);
+        execv(bin_path, av);
         _exit(126);
     }
     return pid;
 }
+
+// flags after the positional arguments belong to the generated server: cap
+// them so the argv array in server_argv never overflows
+#define MAX_SERVER_FLAGS 8
 
 static int cmd_serve(int argc, char **argv)
 {
@@ -836,12 +858,17 @@ static int cmd_serve(int argc, char **argv)
     }
     if (argc <= ai) {
         return die("serve needs VIEWS_DIR "
-                   "(cweb serve [--watch] views [port [root [static]]])");
+                   "(cweb serve [--watch] views [port [root [static]]] [FLAGS...])");
     }
     const char *views_arg = argv[ai++];
     const char *port = argc > ai ? argv[ai++] : "8080";
     const char *root = argc > ai ? argv[ai++] : ".";
     const char *static_arg = argc > ai ? argv[ai++] : "";
+    char **extra = argv + ai;
+    int nextra = argc - ai;
+    if (nextra > MAX_SERVER_FLAGS) {
+        return die("too many server flags");
+    }
 
     char scratch[] = "/tmp/cweb-serve-XXXXXX";
     if (mkdtemp(scratch) == NULL) {
@@ -863,7 +890,9 @@ static int cmd_serve(int argc, char **argv)
         // exec replaces this process, the generated server takes over
         char bin_path[512];
         snprintf(bin_path, sizeof bin_path, "%s/server", scratch);
-        execl(bin_path, "server", "--port", port, NULL);
+        char *av[12];
+        server_argv(av, port, extra, nextra);
+        execv(bin_path, av);
         fprintf(stderr, "cweb: cannot exec %s\n", bin_path);
         return 1;
     }
@@ -877,7 +906,7 @@ static int cmd_serve(int argc, char **argv)
     struct timespec gap = {.tv_sec = 0, .tv_nsec = 200000000};
     intmax_t snap = watch_snapshot(views_arg, static_arg);
     printf("cweb: watching %s (Ctrl-C to stop)\n", views_arg);
-    pid_t child = spawn_server(scratch, port);
+    pid_t child = spawn_server(scratch, port, extra, nextra);
     if (child < 0) {
         return die("cannot spawn the server");
     }
@@ -899,7 +928,7 @@ static int cmd_serve(int argc, char **argv)
         }
         kill(child, SIGTERM);
         waitpid(child, NULL, 0);
-        child = spawn_server(scratch, port);
+        child = spawn_server(scratch, port, extra, nextra);
         if (child < 0) {
             fprintf(stderr, "cweb: cannot respawn the server\n");
             rc = 1;
@@ -929,9 +958,11 @@ static void usage(FILE *f)
         "  build VIEWS_DIR OUT_DIR [ROOT [STATIC]]  compile every\n"
         "                                  VIEWS_DIR/**/*.c.html into C, emit\n"
         "                                  OUT_DIR/main.c and link OUT_DIR/server\n"
-        "  serve [--watch] VIEWS_DIR [PORT [ROOT [STATIC]]]\n"
+        "  serve [--watch] VIEWS_DIR [PORT [ROOT [STATIC]]] [FLAGS...]\n"
         "                                  build into a scratch dir and run it;\n"
-        "                                  --watch rebuilds and restarts on change\n"
+        "                                  --watch rebuilds and restarts on change;\n"
+        "                                  FLAGS pass through to the server\n"
+        "                                  (e.g. --rate 30 --secure)\n"
         "  new APP_DIR                     scaffold a runnable app skeleton\n"
         "  version                         print the framework version\n"
         "\n"
