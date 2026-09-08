@@ -23,6 +23,9 @@
 // TODO: stream the body to disk instead of hoarding it in RAM
 static const size_t REQUEST_BUFFER_CAP = 64 * 1024;
 
+// how long a client may dawdle between bytes without losing the connection
+static const unsigned long REQUEST_TIMEOUT_MS = 5000;
+
 static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
 
 // wall-clock milliseconds for request timing, monotonic so NTP jumps don't
@@ -71,6 +74,29 @@ static void send_error(Socket_Handle client, Http_Status status)
     http_response_free(&res);
 }
 
+// pulls the next chunk of request bytes into the read buffer. returns 0 when
+// bytes arrived, -1 when the connection is past saving: clean EOF and socket
+// errors just close, but a client that stalls mid-request gets a 408 before
+// the door shuts.
+static int fill_more(Socket_Handle client, Read_Buffer *rb)
+{
+    String_View head = rb_write_head(rb);
+    long n = net_recv(client, (void *)head.data, head.count);
+    if (n == NET_READ_TIMEOUT) {
+        if (rb->count > 0) {
+            log_warn("client stalled mid-request, sending 408");
+            send_error(client, HTTP_408_REQUEST_TIMEOUT);
+        }
+        return -1;
+    }
+    if (n <= 0) {
+        // peer went away (0) or the socket is broken (-1), nothing to answer
+        return -1;
+    }
+    rb_commit(rb, (size_t)n);
+    return 0;
+}
+
 // does a comma/space separated header value mention this token, any case?
 static bool header_has_token(Http_Request *req, const char *name, const char *token)
 {
@@ -113,6 +139,9 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
 {
     Read_Buffer rb;
     rb_init(&rb, REQUEST_BUFFER_CAP);
+    // a dawdling client must not pin a worker forever; this is also the
+    // slowloris backstop
+    net_set_timeout(client, REQUEST_TIMEOUT_MS);
 
     for (;;) {
         Request_Parse_Result pr;
@@ -130,14 +159,10 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
                     rb_free(&rb);
                     return;
                 }
-                String_View head = rb_write_head(&rb);
-                long n = net_recv(client, (void *)head.data, head.count);
-                if (n <= 0) {
-                    // client went away mid-request, nothing to answer
+                if (fill_more(client, &rb) != 0) {
                     rb_free(&rb);
                     return;
                 }
-                rb_commit(&rb, (size_t)n);
                 continue;
             }
             if (pr == REQ_ERROR) {
@@ -156,13 +181,10 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
                         rb_free(&rb);
                         return;
                     }
-                    String_View head = rb_write_head(&rb);
-                    long n = net_recv(client, (void *)head.data, head.count);
-                    if (n <= 0) {
+                    if (fill_more(client, &rb) != 0) {
                         rb_free(&rb);
                         return;
                     }
-                    rb_commit(&rb, (size_t)n);
                     continue;
                 }
                 if (dr < 0) {

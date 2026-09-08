@@ -53,6 +53,31 @@ int main(void)
     n = net_recv(peer, buf, sizeof(buf));
     fails += check("close seen as EOF", n == 0);
 
+    // a connected socket with nothing coming in eventually times out instead
+    // of blocking the thread forever (slowloris backstop)
+    Socket_Handle srv2 = net_listen(0);
+    int port2 = net_bound_port(srv2);
+    Socket_Handle client2 = net_connect("127.0.0.1", port2);
+    Socket_Handle peer2 = net_accept(srv2);
+    if (net_set_timeout(peer2, 200) != 0) {
+        fprintf(stderr, "net_set_timeout failed: %s\n", net_error_string());
+        return 1;
+    }
+    n = net_recv(peer2, buf, sizeof(buf));
+    fails += check("empty socket times out", n == NET_READ_TIMEOUT);
+
+    // and after the timeout the socket is still usable once data shows up
+    if (net_send_all(client2, "late", 4) != 4) {
+        fprintf(stderr, "late send failed: %s\n", net_error_string());
+        return 1;
+    }
+    n = net_recv(peer2, buf, sizeof(buf));
+    fails += check("socket alive after timeout", n == 4 && memcmp(buf, "late", 4) == 0);
+
+    net_close(client2);
+    net_close(peer2);
+    net_close(srv2);
+
     net_close(peer);
     net_close(srv);
     net_cleanup();

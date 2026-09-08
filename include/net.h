@@ -21,10 +21,16 @@ Socket_Handle net_accept(Socket_Handle listener);
 // blocking tcp connect to host:port ("127.0.0.1" style, no DNS yet)
 Socket_Handle net_connect(const char *host, int port);
 
-// bytes read, 0 on an orderly close, -1 on error
+// bytes read, 0 on an orderly close, -1 on error. after net_set_timeout a
+// read that sits empty for the budget comes back as NET_READ_TIMEOUT.
 long net_recv(Socket_Handle sock, void *buf, size_t len);
+#define NET_READ_TIMEOUT (-2)
 // sends until everything is out or the connection dies. -1 on error.
 long net_send_all(Socket_Handle sock, const void *buf, size_t len);
+
+// bounds future net_recv calls on sock to ms milliseconds. 0 disables the
+// bound again. returns 0 or -1.
+int net_set_timeout(Socket_Handle sock, unsigned long ms);
 
 void net_close(Socket_Handle sock);
 
