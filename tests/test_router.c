@@ -11,6 +11,9 @@ typedef struct {
     int called;
     char id[64];
     char name[64];
+    char flag[64];
+    char k[64];
+    char user[64];
 } Record;
 
 static void user_handler(Http_Request *req, Http_Response *res, Str_Map *params, void *ud)
@@ -21,6 +24,34 @@ static void user_handler(Http_Request *req, Http_Response *res, Str_Map *params,
     const char *id = strmap_get_cstr(params, "id");
     if (id) {
         strncpy(rec->id, id, sizeof(rec->id) - 1);
+    }
+    const char *flag = strmap_get_cstr(params, "flag");
+    if (flag) {
+        strncpy(rec->flag, flag, sizeof(rec->flag) - 1);
+    }
+    http_response_set_status(res, HTTP_200_OK);
+}
+
+static void pick_handler(Http_Request *req, Http_Response *res, Str_Map *params, void *ud)
+{
+    (void)req;
+    Record *rec = ud;
+    rec->called = 1;
+    const char *k = strmap_get_cstr(params, "k");
+    if (k) {
+        strncpy(rec->k, k, sizeof(rec->k) - 1);
+    }
+    http_response_set_status(res, HTTP_200_OK);
+}
+
+static void form_handler(Http_Request *req, Http_Response *res, Str_Map *params, void *ud)
+{
+    (void)req;
+    Record *rec = ud;
+    rec->called = 1;
+    const char *user = strmap_get_cstr(params, "user");
+    if (user) {
+        strncpy(rec->user, user, sizeof(rec->user) - 1);
     }
     http_response_set_status(res, HTTP_200_OK);
 }
@@ -41,10 +72,12 @@ int main(void)
 {
     Http_Router router;
     router_init(&router);
-    Record a = {0}, b = {0};
+    Record a = {0}, b = {0}, c = {0}, d = {0};
     router_add(&router, HTTP_GET, "/users/<id>", user_handler, &a);
     router_add(&router, HTTP_GET, "/pets/<name>/food", pet_handler, &b);
+    router_add(&router, HTTP_GET, "/pick/<k>", pick_handler, &c);
     router_add(&router, HTTP_POST, "/users", user_handler, &a);
+    router_add(&router, HTTP_POST, "/form", form_handler, &d);
 
     Http_Request req;
     Http_Response res;
@@ -64,6 +97,56 @@ int main(void)
     router_dispatch(&req, &res, &router);
     if (!b.called || strcmp(b.name, "whiskers") != 0) {
         fprintf(stderr, "pet route did not capture name\n");
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // query params ride along with route captures
+    http_request_parse(&req, sv_from_cstr("GET /users/12?flag=on HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (!a.called || strcmp(a.id, "12") != 0 || strcmp(a.flag, "on") != 0) {
+        fprintf(stderr, "query param did not reach the handler\n");
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a captured segment wins over a query key with the same name
+    http_request_parse(&req, sv_from_cstr("GET /pick/route?k=query HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (!c.called || strcmp(c.k, "route") != 0) {
+        fprintf(stderr, "route capture should override query (got %s)\n", c.k);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // urlencoded body fields become params
+    http_request_parse(&req, sv_from_cstr(
+        "POST /form HTTP/1.1\r\n"
+        "Host: x\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: 20\r\n"
+        "\r\n"
+        "user=alice&pw=secret"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (!d.called || strcmp(d.user, "alice") != 0) {
+        fprintf(stderr, "form field did not reach the handler (user=%s)\n", d.user);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // malformed query data is a 400
+    http_request_parse(&req, sv_from_cstr("GET /users/1?x=%zz HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (res.status != HTTP_400_BAD_REQUEST) {
+        fprintf(stderr, "malformed query should be 400\n");
         return 1;
     }
     http_response_free(&res);

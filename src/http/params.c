@@ -1,5 +1,6 @@
 #include "params.h"
 
+#include "request.h"
 #include "strmap.h"
 #include "sv.h"
 #include "url.h"
@@ -39,6 +40,20 @@ int params_parse_into(Str_Map *m, String_View s)
         xfree(dk);
         xfree(dv);
         if (rc != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int request_merge_params(Http_Request *req, Str_Map *out)
+{
+    if (req->query.count > 0 && params_parse_into(out, req->query) != 0) {
+        return -1;
+    }
+    const String_View *content_type = http_request_get_header(req, "content-type");
+    if (content_type && sv_starts_with(*content_type, "application/x-www-form-urlencoded")) {
+        if (params_parse_into(out, req->body) != 0) {
             return -1;
         }
     }
