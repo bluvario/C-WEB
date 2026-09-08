@@ -73,7 +73,17 @@ static void chunk_handler(Http_Request *req, Http_Response *res,
     (void)req;
     (void)params;
     (void)user_data;
+    g_part = 0; // each request replays the three parts
     http_response_set_stream(res, chunk_pump, NULL);
+}
+
+// streamed responses reuse the surrogate connection; this one demands the
+// connection be shut right after, which must force the client to let go
+static void close_handler(Http_Request *req, Http_Response *res,
+                          Str_Map *params, void *user_data)
+{
+    echo_handler(req, res, params, user_data);
+    http_response_set_header(res, "Connection", "close");
 }
 
 int main(void)
@@ -95,6 +105,7 @@ int main(void)
     router_add(&router, HTTP_GET, "/echo", echo_handler, NULL);
     router_add(&router, HTTP_POST, "/echo", echo_handler, NULL);
     router_add(&router, HTTP_GET, "/chunks", chunk_handler, NULL);
+    router_add(&router, HTTP_GET, "/close", close_handler, NULL);
 
     pid_t child = fork();
     if (child == 0) {
@@ -172,6 +183,72 @@ int main(void)
     fails += check("connect error message present",
                    r.error != NULL && strlen(r.error) > 0);
     http_client_result_free(&r);
+
+    // ---- persistent client: keep-alive reuse on one socket ----
+    Http_Client *pc = http_client_open(url);
+    fails += check("persistent client opened", pc != NULL);
+    fails += check("no connection before first request", !http_client_keepalive_active(pc));
+
+    fails += check("reuse req 1",
+                   http_client_req(pc, "/echo?x=1", HTTP_GET, NULL,
+                                   (String_View){0}, &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("reuse body 1",
+                   r.body.count == strlen("echo:/echo|x=1||none") &&
+                   memcmp(r.body.items, "echo:/echo|x=1||none", r.body.count) == 0);
+    fails += check("server offered keep-alive",
+                   strstr(r.headers.items, "Connection: keep-alive\r\n") != NULL);
+    fails += check("connection kept open", http_client_keepalive_active(pc));
+    http_client_result_free(&r);
+
+    fails += check("reuse req 2 on the same socket",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("still exactly one connection", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    // chunked responses must leave the socket in sync for the next request
+    fails += check("reuse chunked req",
+                   http_client_req_get(pc, "/chunks", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("reuse chunked body",
+                   r.body.count == strlen("one-two-three") &&
+                   memcmp(r.body.items, "one-two-three", r.body.count) == 0);
+    fails += check("chunked socket still live", http_client_keepalive_active(pc));
+    fails += check("still one connection after chunked", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    fails += check("post-chunk followup on the same socket",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("still one connection after followup", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    // a response demanding Connection: close must drop the socket
+    fails += check("close-request succeeds",
+                   http_client_req_get(pc, "/close", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("client dropped the socket", !http_client_keepalive_active(pc));
+    http_client_result_free(&r);
+
+    fails += check("reconnects automatically",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("two connections after reconnect", http_client_connection_opens(pc) == 2);
+    http_client_result_free(&r);
+
+    // with no base URL, relative targets are refused up front
+    Http_Client *pc2 = http_client_open(NULL);
+    fails += check("no-base client refuses relative targets",
+                   http_client_req_get(pc2, "/echo", &r) == -1 &&
+                   r.error != NULL && strstr(r.error, "base URL") != NULL);
+    http_client_result_free(&r);
+    fails += check("garbage base url refused", http_client_open("not a url") == NULL);
+    http_client_close(pc2);
+
+    // let the server's 5s idle timeout kill the keep-alive connection, then a
+    // GET must silently reopen instead of erroring
+    sleep(6);
+    fails += check("dead-keepalive GET reconnects",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("reopened exactly once", http_client_connection_opens(pc) == 3);
+    http_client_result_free(&r);
+
+    http_client_close(pc);
 
     router_free(&router);
     kill(child, SIGTERM);
