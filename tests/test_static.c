@@ -11,6 +11,7 @@
 #include "static.h"
 #include "strbuf.h"
 #include "sv.h"
+#include "date.h"
 
 static void write_fixture(const char *path, const char *content)
 {
@@ -65,7 +66,6 @@ int main(void)
     Http_Request req;
     Http_Response res;
     Strbuf wire;
-    const char *expect;
 
     http_request_parse(&req, sv_from_cstr("GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n"));
     http_response_init(&res);
@@ -73,9 +73,15 @@ int main(void)
     strbuf_init(&wire);
     http_response_serialize(&res, &wire);
     strbuf_null_terminate(&wire);
-    expect = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello static";
-    if (strcmp(wire.items, expect) != 0) {
-        fprintf(stderr, "text file response wrong:\n%s\n", wire.items);
+    const char *expect = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n";
+    if (strncmp(wire.items, expect, strlen(expect)) != 0) {
+        fprintf(stderr, "text file status or type wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    if (strstr(wire.items, "Content-Length: 12\r\n") == NULL ||
+        res.body.count != 12 ||
+        memcmp(res.body.items, "hello static", 12) != 0) {
+        fprintf(stderr, "text file body wrong:\n%s\n", wire.items);
         return 1;
     }
     strbuf_free(&wire);
@@ -108,7 +114,45 @@ int main(void)
         fprintf(stderr, "png mime wrong:\n%s\n", wire.items);
         return 1;
     }
+    // the 200 path advertises its Last-Modified time
+    if (strstr(wire.items, "Last-Modified: ") == NULL) {
+        fprintf(stderr, "no Last-Modified header\n");
+        return 1;
+    }
     strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a copy the client already holds comes back as 304 with no body
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: Sat, 01 Jan 2100 00:00:00 GMT\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_304_NOT_MODIFIED) {
+        fprintf(stderr, "stale client should get 304, got %d\n", (int)res.status);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "HTTP/1.1 304 Not Modified") == NULL ||
+        res.body.count != 0) {
+        fprintf(stderr, "304 carried a body or a bad status line:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // an unparseable If-Modified-Since must not break the 200
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: some day\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_200_OK) {
+        fprintf(stderr, "garbage If-Modified-Since should fall through to 200, got %d\n", (int)res.status);
+        return 1;
+    }
     http_response_free(&res);
     http_request_free(&req);
 

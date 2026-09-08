@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "date.h"
+#include "sv.h"
 
 int main(void)
 {
@@ -37,6 +38,26 @@ int main(void)
     }
     if (year < 2020) {
         fprintf(stderr, "now date year looks wrong: %d (%s)\n", year, buf);
+        return 1;
+    }
+
+    // parse back a known instant: Sun, 06 Nov 1994 08:49:37 GMT == 784111777
+    time_t t = http_date_parse(sv_from_cstr("Sun, 06 Nov 1994 08:49:37 GMT"));
+    if (t != (time_t)784111777) {
+        fprintf(stderr, "parsed date wrong: %lld\n", (long long)t);
+        return 1;
+    }
+
+    // round trip through format and back
+    t = 1700000000;
+    http_date_rfc7231(t, buf, sizeof(buf));
+    if (http_date_parse(sv_from_cstr(buf)) != t) {
+        fprintf(stderr, "round trip failed: %s\n", buf);
+        return 1;
+    }
+
+    if (http_date_parse(sv_from_cstr("not a date at all")) != (time_t)-1) {
+        fprintf(stderr, "garbage date should fail\n");
         return 1;
     }
 

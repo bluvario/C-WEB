@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "date.h"
 #include "file.h"
 #include "http.h"
 #include "mime.h"
@@ -73,15 +74,6 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
         return;
     }
 
-    char *data;
-    size_t len;
-    if (file_read_all(path.items, &data, &len) != 0) {
-        reject(res, HTTP_404_NOT_FOUND);
-        strbuf_free(&path);
-        return;
-    }
-    strbuf_free(&path);
-
     char mime_z[64];
     if (mime.count >= sizeof(mime_z)) {
         mime.count = sizeof(mime_z) - 1;
@@ -91,6 +83,34 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
 
     http_response_set_status(res, HTTP_200_OK);
     http_response_set_header(res, "Content-Type", mime_z);
+
+    // a Last-Modified stamp plus 304 when the client already has the file
+    time_t mtime = file_mtime(path.items);
+    if (mtime >= 0) {
+        char lm[64];
+        http_date_rfc7231(mtime, lm, sizeof(lm));
+        http_response_set_header(res, "Last-Modified", lm);
+
+        const String_View *ims = http_request_get_header(req, "if-modified-since");
+        if (ims != NULL) {
+            time_t since = http_date_parse(*ims);
+            if (since >= 0 && mtime <= since) {
+                http_response_set_status(res, HTTP_304_NOT_MODIFIED);
+                strbuf_free(&path);
+                return;
+            }
+        }
+    }
+
+    char *data;
+    size_t len;
+    if (file_read_all(path.items, &data, &len) != 0) {
+        reject(res, HTTP_404_NOT_FOUND);
+        strbuf_free(&path);
+        return;
+    }
+    strbuf_free(&path);
+
     http_response_add_body(res, (String_View){data, len});
     xfree(data);
 }

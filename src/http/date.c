@@ -3,12 +3,37 @@
 #include "date.h"
 
 #include <stdio.h>
+#include <string.h>
+
+#include "sv.h"
 
 static const char *const wdays[] =
     {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 static const char *const months[] =
     {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+static int month_index(const char *mon)
+{
+    for (int i = 0; i < 12; i++) {
+        if (strncmp(mon, months[i], 3) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// days since epoch for the civil date, from Howard Hinnant's civil-from-days
+// algorithm: exact, no timezone and no clock system calls involved
+static long days_from_civil(int y, unsigned m, unsigned d)
+{
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long)doe - 719468;
+}
 
 char *http_date_rfc7231(time_t t, char *buf, size_t bufsize)
 {
@@ -27,4 +52,45 @@ char *http_date_rfc7231(time_t t, char *buf, size_t bufsize)
 char *http_date_now(char *buf, size_t bufsize)
 {
     return http_date_rfc7231(time(NULL), buf, bufsize);
+}
+
+time_t http_date_parse(String_View text)
+{
+    // IMF-fixdate is the only form we emit: fixed 29 characters, so a format
+    // string parse has no surprises waiting at the edges
+    if (text.count != 29) {
+        return -1;
+    }
+    // "Sun, 06 Nov 1994 08:49:37 GMT"
+    if (text.data[3] != ',' || text.data[4] != ' ' ||
+        text.data[7] != ' ' || text.data[11] != ' ' ||
+        text.data[16] != ' ' || text.data[19] != ':' ||
+        text.data[22] != ':' || text.data[25] != ' ' ||
+        memcmp(text.data + 26, "GMT", 3) != 0) {
+        return -1;
+    }
+    char mon[4];
+    mon[0] = text.data[8];
+    mon[1] = text.data[9];
+    mon[2] = text.data[10];
+    mon[3] = '\0';
+    int month = month_index(mon);
+    if (month < 0) {
+        return -1;
+    }
+
+    int d = (text.data[5] - '0') * 10 + (text.data[6] - '0');
+    int y = (text.data[12] - '0') * 1000 + (text.data[13] - '0') * 100 +
+            (text.data[14] - '0') * 10 + (text.data[15] - '0');
+    int h = (text.data[17] - '0') * 10 + (text.data[18] - '0');
+    int mi = (text.data[20] - '0') * 10 + (text.data[21] - '0');
+    int s = (text.data[23] - '0') * 10 + (text.data[24] - '0');
+
+    if (d < 1 || d > 31 || y < 1970 || h > 23 || mi > 59 || s > 60) {
+        return -1;
+    }
+
+    long secs = days_from_civil(y, (unsigned)month + 1, (unsigned)d) * 86400L;
+    secs += (long)h * 3600 + (long)mi * 60 + s;
+    return (time_t)secs;
 }
