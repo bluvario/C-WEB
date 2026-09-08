@@ -18,7 +18,7 @@
 #include "response.h"
 #include "strbuf.h"
 #include "sv.h"
-#include "thread.h"
+#include "thread_pool.h"
 #include "xmem.h"
 
 // 64 KiB is plenty for the requests we serve; anything bigger is a 413
@@ -227,8 +227,9 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
     rb_free(&rb);
 }
 
-// one accept -> one connection thread: a slow client must not stall everyone
-// else behind it. the job object owns the socket and is freed by the worker.
+// one accept -> one job on the worker pool: a slow client must not stall
+// everyone else behind it, and the bounded pool caps how many clients can be
+// in flight at once. each job owns its socket and is freed by the worker.
 typedef struct {
     Socket_Handle client;
     Http_Handler_Fn handler;
@@ -247,6 +248,12 @@ static void connection_worker(void *arg)
 
 int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
 {
+    Thread_Pool pool;
+    if (thread_pool_init(&pool, 0, connection_worker) != 0) {
+        log_error("could not start the worker pool");
+        return -1;
+    }
+
     for (;;) {
         Socket_Handle client = net_accept(listener);
         if (client == -1) {
@@ -255,20 +262,20 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
             continue;
         }
 
-        // TODO: cap thread-per-connection with a bounded pool later; for now
-        // detach and let the OS schedule. if spawning fails, serve in place
-        // rather than dropping the client.
         Connection_Job *job = xmalloc(sizeof *job);
         job->client = client;
         job->handler = handler;
         job->user_data = user_data;
-        Thread t;
-        if (thread_init(&t, connection_worker, job) == 0) {
-            thread_detach(&t);
-        } else {
-            log_error("thread spawn failed, serving inline");
-            connection_worker(job);
+        if (thread_pool_submit(&pool, job) != 0) {
+            // only happens after shutdown, so this accept loop is leaving
+            log_error("worker pool shut down, dropping connection");
+            net_close(client);
+            xfree(job);
+            break;
         }
     }
-    return 0; // unreachable
+
+    thread_pool_wait(&pool);
+    thread_pool_free(&pool);
+    return 0;
 }
