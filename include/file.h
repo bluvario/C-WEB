@@ -14,6 +14,10 @@ int file_read_all(const char *path, char **out, size_t *out_len);
 int file_read_range(const char *path, size_t offset, size_t len,
                     char **out, size_t *out_len);
 
+// writes data to path, truncating whatever was there. returns 0 on success,
+// -1 on failure.
+int file_write(const char *path, const void *data, size_t len);
+
 // last-modified time and size of path. returns 0 on success, -1 on error
 // (either *mtime or *size may be NULL if you only need one of them).
 int file_stat(const char *path, time_t *mtime, size_t *size);

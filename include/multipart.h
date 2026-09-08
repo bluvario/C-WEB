@@ -35,6 +35,14 @@ int multipart_parse(Multipart *m, String_View body, const char *boundary);
 // the first part with the given field name, NULL when absent
 Multipart_Part *multipart_get(Multipart *m, const char *name);
 
+// writes a file part to disk under dir, keeping only the last path segment of
+// its filename (anything after '/' or '\\'), and refusing names that could
+// escape dir ("..", absolute paths, empty). the chosen path is written into
+// out_path. returns 0 on success, -1 without touching the disk on refusal
+// or write failure.
+int multipart_save(const Multipart_Part *part, const char *dir,
+                   char *out_path, size_t out_sz);
+
 void multipart_free(Multipart *m);
 
 #endif

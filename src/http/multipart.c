@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "da.h"
+#include "file.h"
 #include "strmap.h"
 #include "sv.h"
 #include "xmem.h"
@@ -209,6 +210,41 @@ Multipart_Part *multipart_get(Multipart *m, const char *name)
         }
     }
     return NULL;
+}
+
+int multipart_save(const Multipart_Part *part, const char *dir,
+                   char *out_path, size_t out_sz)
+{
+    // the filename is client-supplied, so the directory part is stripped to
+    // its very last segment: "photos/../x.png" must arrive as plain x.png and
+    // an absolute "/etc/passwd" as passwd, never a path the client chooses
+    size_t last = part->filename.count;
+    for (size_t i = 0; i < part->filename.count; i++) {
+        if (part->filename.data[i] == '/' || part->filename.data[i] == '\\') {
+            last = part->filename.count - i - 1;
+        }
+    }
+    const char *base = part->filename.data + part->filename.count - last;
+    if (last == 0 || (last == 1 && base[0] == '.') ||
+        (last == 2 && base[0] == '.' && base[1] == '.')) {
+        return -1;
+    }
+
+    size_t dlen = strlen(dir);
+    size_t need = dlen + (dlen > 0 && dir[dlen - 1] != '/' ? 1 : 0) + last + 1;
+    if (need > out_sz) {
+        return -1;
+    }
+    memcpy(out_path, dir, dlen);
+    size_t o = dlen;
+    if (dlen > 0 && dir[dlen - 1] != '/') {
+        out_path[o++] = '/';
+    }
+    memcpy(out_path + o, base, last);
+    o += last;
+    out_path[o] = '\0';
+
+    return file_write(out_path, part->content.data, part->content.count);
 }
 
 void multipart_free(Multipart *m)

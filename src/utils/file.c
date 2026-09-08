@@ -71,6 +71,22 @@ int file_read_range(const char *path, size_t offset, size_t len,
     return 0;
 }
 
+int file_write(const char *path, const void *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    if (len > 0 && fwrite(data, 1, len, f) != len) {
+        fclose(f);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int file_stat(const char *path, time_t *mtime, size_t *size)
 {
 #ifdef _WIN32
