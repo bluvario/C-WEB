@@ -8,9 +8,6 @@
 #include "sv.h"
 #include "xmem.h"
 
-// a boundary must survive inside our stack delimiter buffer
-#define MULTIPART_MAX_BOUNDARY 200
-
 int multipart_boundary(String_View header_value, char *out, size_t out_sz)
 {
     String_View rest = sv_trim(header_value);

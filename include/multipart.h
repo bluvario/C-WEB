@@ -18,6 +18,9 @@ typedef struct {
     size_t capacity;
 } Multipart;
 
+// boundaries longer than this cannot be represented in a stack buffer
+#define MULTIPART_MAX_BOUNDARY 200
+
 // pulls the boundary token out of a Content-Type header value like
 // "multipart/form-data; boundary=------------------------abc". fills *out
 // (NUL-terminated), returns 0, or -1 when the value is not multipart or has

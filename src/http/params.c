@@ -1,5 +1,6 @@
 #include "params.h"
 
+#include "multipart.h"
 #include "request.h"
 #include "strmap.h"
 #include "sv.h"
@@ -52,10 +53,35 @@ int request_merge_params(Http_Request *req, Str_Map *out)
         return -1;
     }
     const String_View *content_type = http_request_get_header(req, "content-type");
-    if (content_type && sv_starts_with(*content_type, "application/x-www-form-urlencoded")) {
+    if (!content_type) {
+        return 0;
+    }
+    if (sv_starts_with(*content_type, "application/x-www-form-urlencoded")) {
         if (params_parse_into(out, req->body) != 0) {
             return -1;
         }
+        return 0;
+    }
+    if (sv_starts_with(*content_type, "multipart/form-data")) {
+        // file parts carry no "value", so they are left to the handler to
+        // fish out itself; plain fields land in out like any other param
+        char boundary[MULTIPART_MAX_BOUNDARY];
+        if (multipart_boundary(*content_type, boundary, sizeof(boundary)) != 0) {
+            return -1;
+        }
+        Multipart mp;
+        if (multipart_parse(&mp, req->body, boundary) != 0) {
+            return -1;
+        }
+        for (size_t i = 0; i < mp.count; i++) {
+            if (mp.items[i].filename.count == 0) {
+                if (strmap_set(out, mp.items[i].name, mp.items[i].content) != 0) {
+                    multipart_free(&mp);
+                    return -1;
+                }
+            }
+        }
+        multipart_free(&mp);
     }
     return 0;
 }

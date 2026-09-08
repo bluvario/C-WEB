@@ -11,8 +11,10 @@
 int params_parse_into(Str_Map *m, String_View encoded);
 
 // merges the request's query string and, when the body claims to be
-// application/x-www-form-urlencoded, the form fields, all into out. the query
-// goes first so later sources win. returns -1 on malformed percent encoding.
+// application/x-www-form-urlencoded or multipart/form-data, the form fields,
+// all into out. the query goes first so later sources win. file parts of a
+// multipart body are skipped (handlers parse them out with multipart_parse
+// when they need the bytes). returns -1 on malformed encoding or framing.
 int request_merge_params(Http_Request *req, Str_Map *out);
 
 #endif
