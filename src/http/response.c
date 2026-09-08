@@ -44,7 +44,7 @@ void http_response_add_body_cstr(Http_Response *res, const char *text)
 void http_response_serialize(Http_Response *res, Strbuf *out)
 {
     // responses in these statuses carry no body per RFC 9110
-    bool body_allowed = res->status != HTTP_204_NO_CONTENT && res->status != HTTP_304_NOT_MODIFIED;
+    bool status_has_no_body = res->status == HTTP_204_NO_CONTENT || res->status == HTTP_304_NOT_MODIFIED;
 
     char line[128];
     snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\n",
@@ -53,7 +53,9 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
 
     strbuf_append(out, res->headers.items, res->headers.count);
 
-    if (body_allowed) {
+    // a HEAD reply advertises the body it would have sent as Content-Length
+    // but carries none of the bytes, so suppress_body leaves body.count intact
+    if (!status_has_no_body) {
         char cl[64];
         snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", res->body.count);
         strbuf_append_cstr(out, cl);
@@ -61,7 +63,7 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
     strbuf_append_cstr(out, "Connection: close\r\n");
     strbuf_append_cstr(out, "\r\n");
 
-    if (body_allowed) {
+    if (!status_has_no_body && !res->suppress_body) {
         strbuf_append(out, res->body.items, res->body.count);
     }
 }

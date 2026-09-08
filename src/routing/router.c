@@ -81,18 +81,24 @@ void router_dispatch(Http_Request *req, Http_Response *res, void *user_data)
     }
 
     // the path may exist under other methods: collect them for the Allow
-    // header (405) instead of answering 404
+    // header (405) instead of answering 404. a HEAD request is served by the
+    // GET handler with the body torn off afterwards.
+    bool as_head = req->method == HTTP_HEAD;
+    Http_Method want = as_head ? HTTP_GET : req->method;
     bool path_found = false;
     char allow[128];
     size_t allow_len = 0;
 
     for (size_t i = 0; i < r->count; i++) {
         Http_Route *route = &r->items[i];
-        bool method_matches = route->method == req->method;
+        bool method_matches = route->method == want;
 
         if (route_path_matches(route->pattern, req->path, method_matches ? &params : NULL)) {
             if (method_matches) {
                 route->handler(req, res, &params, route->user_data);
+                if (as_head) {
+                    res->suppress_body = true; // spill the body, keep length
+                }
                 strmap_free(&params);
                 return; // first match wins
             }

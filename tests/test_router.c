@@ -57,6 +57,16 @@ static void form_handler(Http_Request *req, Http_Response *res, Str_Map *params,
     http_response_set_status(res, HTTP_200_OK);
 }
 
+static void echo_handler(Http_Request *req, Http_Response *res, Str_Map *params, void *ud)
+{
+    (void)req;
+    (void)params;
+    Record *rec = ud;
+    rec->called = 1;
+    http_response_set_status(res, HTTP_200_OK);
+    http_response_add_body_cstr(res, "hello");
+}
+
 static void pet_handler(Http_Request *req, Http_Response *res, Str_Map *params, void *ud)
 {
     (void)req;
@@ -73,10 +83,11 @@ int main(void)
 {
     Http_Router router;
     router_init(&router);
-    Record a = {0}, b = {0}, c = {0}, d = {0};
+    Record a = {0}, b = {0}, c = {0}, d = {0}, e = {0};
     router_add(&router, HTTP_GET, "/users/<id>", user_handler, &a);
     router_add(&router, HTTP_GET, "/pets/<name>/food", pet_handler, &b);
     router_add(&router, HTTP_GET, "/pick/<k>", pick_handler, &c);
+    router_add(&router, HTTP_GET, "/echo", echo_handler, &e);
     router_add(&router, HTTP_POST, "/users", user_handler, &a);
     router_add(&router, HTTP_POST, "/form", form_handler, &d);
 
@@ -186,6 +197,29 @@ int main(void)
     strbuf_null_terminate(&wire);
     if (strstr(wire.items, "Allow: POST\r\n") == NULL) {
         fprintf(stderr, "/users 405 should list POST only:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // HEAD runs the GET handler but suppresses the body, keeping the headers
+    http_request_parse(&req, sv_from_cstr("HEAD /echo HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (!e.called || res.status != HTTP_200_OK || res.body.count != 5) {
+        fprintf(stderr, "HEAD should run GET handler with body kept for length\n");
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Content-Length: 5\r\n") == NULL) {
+        fprintf(stderr, "HEAD should keep the GET Content-Length:\n%s\n", wire.items);
+        return 1;
+    }
+    if (strstr(wire.items, "hello") != NULL) {
+        fprintf(stderr, "HEAD must not carry the body:\n%s\n", wire.items);
         return 1;
     }
     strbuf_free(&wire);
