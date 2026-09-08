@@ -1,5 +1,6 @@
 #include "static.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "date.h"
@@ -20,6 +21,41 @@ static void reject(Http_Response *res, Http_Status status)
     http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
     http_response_add_body_cstr(res, status == HTTP_404_NOT_FOUND ? "404 not found"
                                                                   : "400 bad path");
+}
+
+// does the If-None-Match header list our ETag (or "*" for any existing
+// resource)? weak "W/" prefixes are tolerated, strong comparison otherwise.
+static bool etag_list_matches(String_View header, const char *ours)
+{
+    // strip the quoting from our own validator, the list entries have theirs
+    // peeled off as they come
+    size_t olen = strlen(ours);
+    if (olen >= 2 && ours[0] == '"' && ours[olen - 1] == '"') {
+        ours++;
+        olen -= 2;
+    }
+    String_View rest = header;
+    while (rest.count > 0) {
+        String_View tag = sv_chop_by_delim(&rest, ',');
+        tag = sv_trim(tag);
+        if (tag.count >= 2 && tag.data[0] == 'W' && tag.data[1] == '/') {
+            tag.data += 2;
+            tag.count -= 2;
+            tag = sv_trim(tag);
+        }
+        // "*" matches any entity that exists
+        if (tag.count == 1 && tag.data[0] == '*') {
+            return true;
+        }
+        if (tag.count >= 2 && tag.data[0] == '"' && tag.data[tag.count - 1] == '"') {
+            tag.data++;
+            tag.count -= 2;
+            if (tag.count == olen && memcmp(tag.data, ours, olen) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
@@ -84,22 +120,41 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
     http_response_set_status(res, HTTP_200_OK);
     http_response_set_header(res, "Content-Type", mime_z);
 
-    // a Last-Modified stamp plus 304 when the client already has the file
-    time_t mtime = file_mtime(path.items);
-    if (mtime >= 0) {
-        char lm[64];
-        http_date_rfc7231(mtime, lm, sizeof(lm));
-        http_response_set_header(res, "Last-Modified", lm);
+    // validators: Last-Modified plus a strong ETag from mtime and size. an
+    // If-None-Match answer beats If-Modified-Since when both are present.
+    time_t mtime;
+    size_t fsize;
+    if (file_stat(path.items, &mtime, &fsize) != 0) {
+        reject(res, HTTP_404_NOT_FOUND);
+        strbuf_free(&path);
+        return;
+    }
+    char lm[64];
+    http_date_rfc7231(mtime, lm, sizeof(lm));
+    http_response_set_header(res, "Last-Modified", lm);
 
+    char etag[64];
+    snprintf(etag, sizeof(etag), "\"%08llx-%zx\"",
+             (unsigned long long)mtime, fsize);
+    http_response_set_header(res, "ETag", etag);
+
+    bool not_modified = false;
+    const String_View *inm = http_request_get_header(req, "if-none-match");
+    if (inm != NULL) {
+        not_modified = etag_list_matches(*inm, etag);
+    } else {
         const String_View *ims = http_request_get_header(req, "if-modified-since");
         if (ims != NULL) {
             time_t since = http_date_parse(*ims);
             if (since >= 0 && mtime <= since) {
-                http_response_set_status(res, HTTP_304_NOT_MODIFIED);
-                strbuf_free(&path);
-                return;
+                not_modified = true;
             }
         }
+    }
+    if (not_modified) {
+        http_response_set_status(res, HTTP_304_NOT_MODIFIED);
+        strbuf_free(&path);
+        return;
     }
 
     char *data;

@@ -8,7 +8,8 @@
 // NUL-terminated malloc'd buffer (caller owns it via xfree), -1 on failure.
 int file_read_all(const char *path, char **out, size_t *out_len);
 
-// last-modified time of path in seconds since epoch, or -1 on any error
-time_t file_mtime(const char *path);
+// last-modified time and size of path. returns 0 on success, -1 on error
+// (either *mtime or *size may be NULL if you only need one of them).
+int file_stat(const char *path, time_t *mtime, size_t *size);
 
 #endif

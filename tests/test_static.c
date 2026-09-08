@@ -84,6 +84,25 @@ int main(void)
         fprintf(stderr, "text file body wrong:\n%s\n", wire.items);
         return 1;
     }
+    if (strstr(wire.items, "Last-Modified: ") == NULL) {
+        fprintf(stderr, "no Last-Modified header\n");
+        return 1;
+    }
+    // lift the ETag out of this response to feed the If-None-Match probes
+    const char *etag_at = strstr(wire.items, "\r\nETag: ");
+    if (etag_at == NULL) {
+        fprintf(stderr, "no ETag header\n");
+        return 1;
+    }
+    char etag[128];
+    etag_at += 8;
+    const char *eol = strstr(etag_at, "\r\n");
+    if (eol == NULL || eol - etag_at >= (long)sizeof(etag)) {
+        fprintf(stderr, "ETag malformed\n");
+        return 1;
+    }
+    memcpy(etag, etag_at, (size_t)(eol - etag_at));
+    etag[eol - etag_at] = '\0';
     strbuf_free(&wire);
     http_response_free(&res);
     http_request_free(&req);
@@ -151,6 +170,50 @@ int main(void)
     http_serve_static(&req, &res, rootbuf);
     if (res.status != HTTP_200_OK) {
         fprintf(stderr, "garbage If-Modified-Since should fall through to 200, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // the exact ETag proves the copy is current
+    Strbuf probe;
+    strbuf_init(&probe);
+    strbuf_append_cstr(&probe, "GET /hello.txt HTTP/1.1\r\nHost: x\r\nIf-None-Match: ");
+    strbuf_append_cstr(&probe, etag);
+    strbuf_append_cstr(&probe, "\r\n\r\n");
+    strbuf_null_terminate(&probe);
+    http_request_parse(&req, (String_View){probe.items, probe.count});
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_304_NOT_MODIFIED) {
+        fprintf(stderr, "matching If-None-Match should be 304, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+    strbuf_free(&probe);
+
+    // "*" also stands for any existing resource
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nIf-None-Match: *\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_304_NOT_MODIFIED) {
+        fprintf(stderr, "If-None-Match * should be 304, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a mismatched ETag ignores a stale If-Modified-Since entirely
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\n"
+        "If-None-Match: \"totally-different\"\r\n"
+        "If-Modified-Since: Sat, 01 Jan 2100 00:00:00 GMT\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_200_OK) {
+        fprintf(stderr, "If-None-Match mismatch must trump stale If-Modified-Since, got %d\n", (int)res.status);
         return 1;
     }
     http_response_free(&res);

@@ -41,19 +41,24 @@ int file_read_all(const char *path, char **out, size_t *out_len)
     return 0;
 }
 
-time_t file_mtime(const char *path)
+int file_stat(const char *path, time_t *mtime, size_t *size)
 {
 #ifdef _WIN32
     struct _stat st;
     if (_stat(path, &st) != 0) {
         return -1;
     }
-    return st.st_mtime;
 #else
     struct stat st;
     if (stat(path, &st) != 0) {
         return -1;
     }
-    return st.st_mtime;
 #endif
+    if (mtime) {
+        *mtime = st.st_mtime;
+    }
+    if (size) {
+        *size = (size_t)st.st_size;
+    }
+    return 0;
 }
