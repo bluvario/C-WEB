@@ -377,7 +377,58 @@ int main(void)
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
 
-    ok = ok && app_ok;
+    // --- cweb serve --watch rebuilds and restarts on change ---
+    char wv[1024], ws[1024];
+    snprintf(wv, sizeof wv, "%s/wv", tmp);
+    mkdir(wv, 0755);
+    snprintf(ws, sizeof ws, "%s/ws", tmp);
+    mkdir(ws, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", wv);
+    wfile(wbuf, "<h1>v1</h1>");
+    probe = net_listen(0);
+    int wport = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", wport);
+    pid_t wchild = fork();
+    if (wchild == 0) {
+        execl(TOOL, "cweb", "serve", "--watch", wv, port_arg, ".", ws, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(wport) != 0) {
+        fprintf(stderr, "watch server did not come up on port %d\n", wport);
+        kill(wchild, SIGTERM);
+        waitpid(wchild, NULL, 0);
+        return 1;
+    }
+    char *wb = fetch(wport, "/");
+    int watch_ok = wb != NULL && strstr(wb, "HTTP/1.1 200 OK") != NULL &&
+                   strstr(wb, "<h1>v1</h1>") != NULL;
+    if (!watch_ok) {
+        fprintf(stderr, "watch server should serve the first version:\n%s\n", wb ? wb : "(connect error)");
+    }
+    free(wb);
+
+    // touch the template: the server must rebuild and restart, same port
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", wv);
+    wfile(wbuf, "<h1>v2</h1>");
+    int got_v2 = 0;
+    for (int i = 0; i < 150 && !got_v2; i++) {
+        nap();
+        wb = fetch(wport, "/");
+        if (wb != NULL && strstr(wb, "HTTP/1.1 200 OK") != NULL &&
+            strstr(wb, "<h1>v2</h1>") != NULL) {
+            got_v2 = 1;
+        }
+        free(wb);
+    }
+    kill(wchild, SIGTERM);
+    waitpid(wchild, NULL, 0);
+    if (!got_v2) {
+        fprintf(stderr, "watch server did not serve the edited template\n");
+        return 1;
+    }
+
+    ok = ok && app_ok && watch_ok;
     net_cleanup();
 
     // tidy up the fixture tree

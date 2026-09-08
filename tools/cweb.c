@@ -4,8 +4,9 @@
 //   cweb build views/ out/ [root [static/]]
 //                             compile every views/**/*.c.html to C, generate
 //                             out/main.c and link out/server against libcweb.a
-//   cweb serve views/ [port [root [static/]]]
-//                             build into a scratch dir and run it
+//   cweb serve [--watch] views/ [port [root [static/]]]
+//                             build into a scratch dir and run it; with --watch
+//                             stay up, rebuild and restart on any file change
 //   cweb new app/             scaffold a fresh project: pages, a 404 page, a
 //                             shared partial and a stylesheet, ready to serve
 //   cweb version
@@ -30,10 +31,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cweb.h"
@@ -683,19 +688,108 @@ static int cmd_new(int argc, char **argv)
 }
 
 // ---------------------------------------------------------------------------
-// serve / version
+// serve / watch / version
 // ---------------------------------------------------------------------------
+
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_signal(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
+
+// newest mtime of any regular file under base/rel, folded into best; used to
+// notice templates or static files changing while the watch server runs.
+// sub-second precision keeps a quick edit within the same second from slipping
+// past the comparison
+static intmax_t file_mtime(const struct stat *st)
+{
+    return (intmax_t)st->st_mtim.tv_sec * 1000000000 + (intmax_t)st->st_mtim.tv_nsec;
+}
+
+static intmax_t tree_mtime(const char *base, const char *rel, intmax_t best)
+{
+    char dir_path[4096];
+    if (rel[0] == '\0') {
+        snprintf(dir_path, sizeof dir_path, "%s", base);
+    } else if (path_join(dir_path, sizeof dir_path, base, rel) != 0) {
+        return best;
+    }
+    DIR *d = opendir(dir_path);
+    if (d == NULL) {
+        return best;
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        const char *name = e->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+            continue;
+        }
+        char child[4096];
+        if (rel[0] == '\0') {
+            snprintf(child, sizeof child, "%s", name);
+        } else if (path_join(child, sizeof child, rel, name) != 0) {
+            continue;
+        }
+        char full[4096];
+        if (path_join(full, sizeof full, base, child) != 0) {
+            continue;
+        }
+        struct stat st;
+        if (stat(full, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            best = tree_mtime(base, child, best);
+        } else if (S_ISREG(st.st_mode) && file_mtime(&st) > best) {
+            best = file_mtime(&st);
+        }
+    }
+    closedir(d);
+    return best;
+}
+
+static intmax_t watch_snapshot(const char *views_arg, const char *static_arg)
+{
+    intmax_t best = tree_mtime(views_arg, "", 0);
+    if (static_arg[0] != '\0') {
+        best = tree_mtime(static_arg, "", best);
+    }
+    return best;
+}
+
+static pid_t spawn_server(const char *scratch, const char *port)
+{
+    char bin_path[512];
+    snprintf(bin_path, sizeof bin_path, "%s/server", scratch);
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        execl(bin_path, "server", "--port", port, NULL);
+        _exit(126);
+    }
+    return pid;
+}
 
 static int cmd_serve(int argc, char **argv)
 {
-    if (argc < 3) {
-        return die("serve needs VIEWS_DIR "
-                   "(cweb serve views [port [root [static]]])");
+    int watch = 0;
+    int ai = 2;
+    if (argc > ai && strcmp(argv[ai], "--watch") == 0) {
+        watch = 1;
+        ai++;
     }
-    const char *views_arg = argv[2];
-    const char *port = argc >= 4 ? argv[3] : "8080";
-    const char *root = argc >= 5 ? argv[4] : ".";
-    const char *static_arg = argc >= 6 ? argv[5] : "";
+    if (argc <= ai) {
+        return die("serve needs VIEWS_DIR "
+                   "(cweb serve [--watch] views [port [root [static]]])");
+    }
+    const char *views_arg = argv[ai++];
+    const char *port = argc > ai ? argv[ai++] : "8080";
+    const char *root = argc > ai ? argv[ai++] : ".";
+    const char *static_arg = argc > ai ? argv[ai++] : "";
 
     char scratch[] = "/tmp/cweb-serve-XXXXXX";
     if (mkdtemp(scratch) == NULL) {
@@ -712,12 +806,61 @@ static int cmd_serve(int argc, char **argv)
     if (cmd_build(6, build_av) != 0) {
         return 1;
     }
-    // exec replaces this process, the generated server takes over
-    char bin_path[512];
-    snprintf(bin_path, sizeof bin_path, "%s/server", scratch);
-    execl(bin_path, "server", "--port", port, NULL);
-    fprintf(stderr, "cweb: cannot exec %s\n", bin_path);
-    return 1;
+
+    if (!watch) {
+        // exec replaces this process, the generated server takes over
+        char bin_path[512];
+        snprintf(bin_path, sizeof bin_path, "%s/server", scratch);
+        execl(bin_path, "server", "--port", port, NULL);
+        fprintf(stderr, "cweb: cannot exec %s\n", bin_path);
+        return 1;
+    }
+
+    // watch mode keeps the CLI alive and restarts the server whenever a
+    // template or static file changes; Ctrl-C stops both
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    // snapshot before the server is up: any edit made between now and the
+    // handoff to the caller's first request still counts as a change
+    struct timespec gap = {.tv_sec = 0, .tv_nsec = 200000000};
+    intmax_t snap = watch_snapshot(views_arg, static_arg);
+    printf("cweb: watching %s (Ctrl-C to stop)\n", views_arg);
+    pid_t child = spawn_server(scratch, port);
+    if (child < 0) {
+        return die("cannot spawn the server");
+    }
+
+    int rc = 0;
+    while (!g_stop) {
+        if (nanosleep(&gap, NULL) != 0) {
+            break; // interrupted, almost certainly by the stop signal
+        }
+        intmax_t now = watch_snapshot(views_arg, static_arg);
+        if (now <= snap) {
+            continue;
+        }
+        snap = now;
+        printf("cweb: change detected, rebuilding\n");
+        if (cmd_build(6, build_av) != 0) {
+            fprintf(stderr, "cweb: rebuild failed; keeping the current server\n");
+            continue;
+        }
+        kill(child, SIGTERM);
+        waitpid(child, NULL, 0);
+        child = spawn_server(scratch, port);
+        if (child < 0) {
+            fprintf(stderr, "cweb: cannot respawn the server\n");
+            rc = 1;
+            break;
+        }
+    }
+
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+    char cleanup[4096];
+    snprintf(cleanup, sizeof cleanup, "rm -rf %s", scratch);
+    system(cleanup);
+    return rc;
 }
 
 static int cmd_version(void)
@@ -734,7 +877,9 @@ static void usage(FILE *f)
         "  build VIEWS_DIR OUT_DIR [ROOT [STATIC]]  compile every\n"
         "                                  VIEWS_DIR/**/*.c.html into C, emit\n"
         "                                  OUT_DIR/main.c and link OUT_DIR/server\n"
-        "  serve VIEWS_DIR [PORT [ROOT [STATIC]]] build into a scratch dir and run it\n"
+        "  serve [--watch] VIEWS_DIR [PORT [ROOT [STATIC]]]\n"
+        "                                  build into a scratch dir and run it;\n"
+        "                                  --watch rebuilds and restarts on change\n"
         "  new APP_DIR                     scaffold a runnable app skeleton\n"
         "  version                         print the framework version\n"
         "\n"
