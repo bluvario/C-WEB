@@ -34,4 +34,7 @@ String_View sv_chop_by_delim(String_View *sv, char delim);
 // parses a decimal integer, returns false on garbage input
 bool sv_to_i64(String_View sv, long long *out);
 
+// how many times a byte shows up in sv
+size_t sv_count_char(String_View sv, char c);
+
 #endif

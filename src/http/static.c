@@ -58,6 +58,65 @@ static bool etag_list_matches(String_View header, const char *ours)
     return false;
 }
 
+// single-range bytes=<start>-<end> only. returns 0 when no range applies (the
+// whole file is served), 1 when only [*base, *base+*n) should be served, and
+// -1 when the header asks for bytes the file cannot cover (caller answers
+// 416). multi-range lists get a plain 200, which is always legal.
+static int parse_range(String_View header, size_t fsize, size_t *base, size_t *n)
+{
+    header = sv_trim(header);
+    if (!sv_consume_prefix(&header, "bytes=")) {
+        return 0;
+    }
+    // any comma means a list; one 200 with the full body covers them all
+    if (sv_count_char(header, ',') > 0) {
+        return 0;
+    }
+    String_View start = sv_chop_by_delim(&header, '-');
+    start = sv_trim(start);
+    header = sv_trim(header);
+
+    if (start.count == 0 && header.count == 0) {
+        return -1; // "bytes=" with nothing at all
+    }
+
+    if (start.count > 0 && header.count == 0) {
+        // "N-": from N to the end
+        long long from;
+        if (!sv_to_i64(start, &from) || from < 0 || (size_t)from >= fsize) {
+            return -1;
+        }
+        *base = (size_t)from;
+        *n = fsize - *base;
+        return 1;
+    }
+
+    if (start.count == 0 && header.count > 0) {
+        // "-N": the final N bytes
+        long long last;
+        if (!sv_to_i64(header, &last) || last <= 0) {
+            return -1;
+        }
+        if (fsize == 0) {
+            return -1;
+        }
+        *n = (size_t)last < fsize ? (size_t)last : fsize;
+        *base = fsize - *n;
+        return 1;
+    }
+
+    // "N-M": a closed window, clamped to the file end
+    long long from, to;
+    if (!sv_to_i64(start, &from) || !sv_to_i64(header, &to) ||
+        from < 0 || to < from || (size_t)from >= fsize) {
+        return -1;
+    }
+    *base = (size_t)from;
+    size_t want = (size_t)(to - from) + 1;
+    *n = want < fsize - *base ? want : fsize - *base;
+    return 1;
+}
+
 void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
 {
     const char *root = user_data;
@@ -157,14 +216,43 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
         return;
     }
 
+    // ranges only make sense for fetches; other verbs get the whole entity
+    size_t base = 0;
+    size_t rlen = fsize;
+    bool partial = false;
+    if (req->method == HTTP_GET || req->method == HTTP_HEAD) {
+        const String_View *range = http_request_get_header(req, "range");
+        if (range != NULL) {
+            int rr = parse_range(*range, fsize, &base, &rlen);
+            if (rr < 0) {
+                // tell the client what the resource will actually hand out
+                char bad[64];
+                snprintf(bad, sizeof(bad), "bytes */%zu", fsize);
+                http_response_set_status(res, HTTP_416_RANGE_NOT_SATISFIABLE);
+                http_response_set_header(res, "Content-Range", bad);
+                strbuf_free(&path);
+                return;
+            }
+            partial = rr > 0;
+        }
+    }
+
     char *data;
     size_t len;
-    if (file_read_all(path.items, &data, &len) != 0) {
+    if (partial ? file_read_range(path.items, base, rlen, &data, &len) != 0
+                : file_read_all(path.items, &data, &len) != 0) {
         reject(res, HTTP_404_NOT_FOUND);
         strbuf_free(&path);
         return;
     }
     strbuf_free(&path);
+
+    if (partial) {
+        char cr[64];
+        snprintf(cr, sizeof(cr), "bytes %zu-%zu/%zu", base, base + len - 1, fsize);
+        http_response_set_header(res, "Content-Range", cr);
+        http_response_set_status(res, HTTP_206_PARTIAL_CONTENT);
+    }
 
     http_response_add_body(res, (String_View){data, len});
     xfree(data);

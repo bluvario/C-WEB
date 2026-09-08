@@ -219,6 +219,85 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
+    // Range: bytes=0-4 slices the first five bytes
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-4\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT) {
+        fprintf(stderr, "range should be 206, got %d\n", (int)res.status);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (res.body.count != 5 || memcmp(res.body.items, "hello", 5) != 0 ||
+        strstr(wire.items, "Content-Range: bytes 0-4/12\r\n") == NULL) {
+        fprintf(stderr, "range body or Content-Range wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // Range: bytes=6- means "from the final word onward"
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=6-\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT ||
+        res.body.count != 6 || memcmp(res.body.items, "static", 6) != 0) {
+        fprintf(stderr, "open-ended range wrong, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // Range: bytes=-6 takes the final six bytes
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=-6\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT ||
+        res.body.count != 6 || memcmp(res.body.items, "static", 6) != 0) {
+        fprintf(stderr, "suffix range wrong, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // past-the-end ranges are 416 with the resource's real span
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=100-\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_416_RANGE_NOT_SATISFIABLE) {
+        fprintf(stderr, "out of range should be 416, got %d\n", (int)res.status);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Content-Range: bytes */12\r\n") == NULL) {
+        fprintf(stderr, "416 missing span header:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a multi-range list is answered in full because one 200 covers them all
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-2,4-5\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_200_OK || res.body.count != 12) {
+        fprintf(stderr, "multi-range should fall back to full 200, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
     // traversal is refused
     http_request_parse(&req, sv_from_cstr("GET /../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n"));
     http_response_init(&res);

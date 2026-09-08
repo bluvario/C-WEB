@@ -41,6 +41,36 @@ int file_read_all(const char *path, char **out, size_t *out_len)
     return 0;
 }
 
+int file_read_range(const char *path, size_t offset, size_t len,
+                    char **out, size_t *out_len)
+{
+    *out = NULL;
+    *out_len = 0;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return -1;
+    }
+    if (fseek(f, (long)offset, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    // TODO: fseek/ftell work on longs, files past LONG_MAX are out of reach
+    char *buf = xmalloc(len + 1);
+    if (len > 0 && fread(buf, 1, len, f) != len) {
+        xfree(buf);
+        fclose(f);
+        return -1;
+    }
+    buf[len] = '\0';
+    fclose(f);
+
+    *out = buf;
+    *out_len = len;
+    return 0;
+}
+
 int file_stat(const char *path, time_t *mtime, size_t *size)
 {
 #ifdef _WIN32

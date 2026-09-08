@@ -94,3 +94,14 @@ bool sv_to_i64(String_View sv, long long *out)
     *out = neg ? -n : n;
     return true;
 }
+
+size_t sv_count_char(String_View sv, char c)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < sv.count; i++) {
+        if (sv.data[i] == c) {
+            n++;
+        }
+    }
+    return n;
+}
