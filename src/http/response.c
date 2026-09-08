@@ -8,6 +8,8 @@
 void http_response_init(Http_Response *res)
 {
     res->status = HTTP_200_OK;
+    res->suppress_body = false;
+    res->keep_alive = false;
     strbuf_init(&res->headers);
     strbuf_init(&res->body);
 }
@@ -81,7 +83,8 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
         snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", res->body.count);
         strbuf_append_cstr(out, cl);
     }
-    strbuf_append_cstr(out, "Connection: close\r\n");
+    strbuf_append_cstr(out, res->keep_alive ? "Connection: keep-alive\r\n"
+                                             : "Connection: close\r\n");
     strbuf_append_cstr(out, "\r\n");
 
     if (!status_has_no_body && !res->suppress_body) {

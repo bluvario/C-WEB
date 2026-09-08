@@ -38,6 +38,10 @@ typedef enum {
 } Request_Parse_Result;
 
 Request_Parse_Result http_request_parse(Http_Request *req, String_View raw);
+// like http_request_parse, but also hands back how many bytes of *raw belong
+// to this one request (headers plus declared body), so the socket layer can
+// keep any pipelined remainder buffered.
+Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, size_t *consumed);
 void http_request_free(Http_Request *req);
 
 // case-insensitive header lookup (HTTP names are case-insensitive),

@@ -12,6 +12,7 @@ typedef struct {
     Strbuf headers; // raw "Name: value\r\n" text
     Strbuf body;    // the actual payload; HEAD requests keep it for length
     bool suppress_body; // serialize headers but emit no body bytes
+    bool keep_alive; // advertise Connection: keep-alive instead of close
 } Http_Response;
 
 void http_response_init(Http_Response *res);

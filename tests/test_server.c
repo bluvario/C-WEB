@@ -58,13 +58,18 @@ int main(void)
     const char *request =
         "GET /hello?x=1 HTTP/1.1\r\n"
         "Host: localhost\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+        "GET /again HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Connection: close\r\n"
         "\r\n";
     if (net_send_all(client, request, strlen(request)) != (long)strlen(request)) {
         fprintf(stderr, "request send failed\n");
         return 1;
     }
 
-    char buf[4096];
+    char buf[8192];
     size_t got = 0;
     long n;
     while (got < sizeof(buf) - 1 && (n = net_recv(client, buf + got, sizeof(buf) - got - 1)) > 0) {
@@ -72,9 +77,16 @@ int main(void)
     }
     buf[got] = '\0';
 
+    // both pipelined requests must be served over the same connection: the
+    // first advertises keep-alive, the second closes it
     int ok = strstr(buf, "HTTP/1.1 200 OK") != NULL &&
              strstr(buf, "Hello, /hello!") != NULL &&
-             strstr(buf, "Content-Length: 14\r\n") != NULL;
+             strstr(buf, "Content-Length: 14\r\n") != NULL &&
+             strstr(buf, "Connection: keep-alive\r\n") != NULL &&
+             strstr(buf, "Hello, /again!") != NULL &&
+             strstr(buf, "Content-Length: 14\r\n") != NULL &&
+             strstr(buf, "Connection: close\r\n") != NULL &&
+             strstr(buf, "Hello, /hello!") < strstr(buf, "Hello, /again!");
     if (!ok) {
         fprintf(stderr, "unexpected response:\n%s\n", buf);
     }

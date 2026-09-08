@@ -71,8 +71,9 @@ static int parse_header_line(Http_Request *req, String_View line)
     return 0;
 }
 
-Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
+Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, size_t *consumed)
 {
+    *consumed = 0;
     req->method = HTTP_UNKNOWN_METHOD;
     req->target = req->path = req->query = req->version = req->body = (String_View){0};
     req->headers.items = NULL;
@@ -116,8 +117,17 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
             http_request_free(req);
             return REQ_INCOMPLETE;
         }
+        *consumed = end + (size_t)len;
+    } else {
+        *consumed = end;
     }
     return REQ_OK;
+}
+
+Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
+{
+    size_t consumed;
+    return http_request_parse_adv(req, raw, &consumed);
 }
 
 void http_request_free(Http_Request *req)

@@ -1,5 +1,8 @@
 #include "server.h"
 
+#include <ctype.h>
+#include <string.h>
+
 #include "buffer.h"
 #include "http.h"
 #include "log.h"
@@ -37,43 +40,98 @@ static void send_error(Socket_Handle client, Http_Status status)
     http_response_free(&res);
 }
 
+// does a comma/space separated header value mention this token, any case?
+static bool header_has_token(Http_Request *req, const char *name, const char *token)
+{
+    const String_View *value = http_request_get_header(req, name);
+    if (value == NULL) {
+        return false;
+    }
+    size_t n = strlen(token);
+    String_View rest = *value;
+    while (rest.count > 0) {
+        String_View part = sv_chop_by_delim(&rest, ',');
+        part = sv_trim(part);
+        if (part.count == n) {
+            bool same = true;
+            for (size_t i = 0; i < n; i++) {
+                if (tolower((unsigned char)part.data[i]) != tolower((unsigned char)token[i])) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// HTTP/1.1 keeps the connection by default, HTTP/1.0 drops it unless the
+// client says keep-alive, and an explicit Connection: close always wins
+static bool conn_keep_alive(Http_Request *req)
+{
+    bool close = header_has_token(req, "connection", "close");
+    bool keep = header_has_token(req, "connection", "keep-alive");
+    bool http11 = sv_equal(req->version, sv_from_cstr("HTTP/1.1"));
+    return !close && (http11 || keep);
+}
+
 void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data)
 {
     Read_Buffer rb;
     rb_init(&rb, REQUEST_BUFFER_CAP);
 
     for (;;) {
-        String_View head = rb_write_head(&rb);
-        long n = net_recv(client, (void *)head.data, head.count);
-        if (n <= 0) {
-            break; // peer closed or errored, nothing more to say
-        }
-        rb_commit(&rb, (size_t)n);
-
+        Request_Parse_Result pr;
+        size_t consumed = 0;
         Http_Request req;
-        Request_Parse_Result pr = http_request_parse(&req, rb_view(&rb));
+
+        // fill the buffer until a whole request is staged; pipelined bytes
+        // already buffered just parse without another recv
+        for (;;) {
+            pr = http_request_parse_adv(&req, rb_view(&rb), &consumed);
+            if (pr == REQ_INCOMPLETE) {
+                if (rb.count >= rb.capacity) {
+                    log_warn("request exceeds %zu bytes, sending 413", REQUEST_BUFFER_CAP);
+                    send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                    rb_free(&rb);
+                    return;
+                }
+                String_View head = rb_write_head(&rb);
+                long n = net_recv(client, (void *)head.data, head.count);
+                if (n <= 0) {
+                    // client went away mid-request, nothing to answer
+                    rb_free(&rb);
+                    return;
+                }
+                rb_commit(&rb, (size_t)n);
+                continue;
+            }
+            break; // REQ_OK or REQ_ERROR
+        }
+
         if (pr == REQ_ERROR) {
             log_warn("malformed request from client, sending 400");
             send_error(client, HTTP_400_BAD_REQUEST);
             break;
         }
-        if (pr == REQ_INCOMPLETE) {
-            if (rb.count >= rb.capacity) {
-                log_warn("request exceeds %zu bytes, sending 413", REQUEST_BUFFER_CAP);
-                send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
-                break;
-            }
-            continue; // wait for the rest of the request
-        }
 
+        bool keep = conn_keep_alive(&req);
         Http_Response res;
         http_response_init(&res);
         handler(&req, &res, user_data);
+        res.keep_alive = keep;
         http_request_free(&req);
 
         send_wire(client, &res);
         http_response_free(&res);
-        break; // Connection: close, one request per connection
+
+        rb_discard(&rb, consumed);
+        if (!keep) {
+            break;
+        }
     }
 
     rb_free(&rb);
