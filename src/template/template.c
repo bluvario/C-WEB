@@ -224,6 +224,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include \"strbuf.h\"\n"
             "#include \"sv.h\"\n"
             "#include \"template.h\"\n"
+            "#include \"db.h\"\n"
             "\n"
             "// cweb build emits out/pages.h declaring every page, so a page\n"
             "// can render another as a partial: <?c page_x(req,res,params,user_data); ?>\n"

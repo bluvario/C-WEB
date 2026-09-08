@@ -253,10 +253,20 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"static.h\"\n"
         "#include \"strmap.h\"\n"
         "#include \"template.h\"\n"
+        "#include \"db.h\"\n"
         "\n"
         "// one server-side session store for the whole process, handed to every\n"
         "// page as user_data; sessions live for an hour of inactivity\n"
         "static Http_Session_Store cweb_sessions;\n"
+        "\n"
+        "// the store behind cweb_database(), opened from --db PATH. zeroed until\n"
+        "// then, so pages that call the accessor before it is open get NULL\n"
+        "static Cweb_Db cweb_database_impl;\n"
+        "static int cweb_database_open = 0;\n"
+        "Cweb_Db *cweb_database(void)\n"
+        "{\n"
+        "    return cweb_database_open ? &cweb_database_impl : NULL;\n"
+        "}\n"
         "\n"
         "// per-client bucket key when --rate is on: the caller's IP as text.\n"
         "// an empty remote (before the server fills it in) would route every\n"
@@ -385,6 +395,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    int port = 8080;\n"
         "    int rate_per_min = 0;\n"
         "    int secure = 0;\n"
+        "    const char *db_path = NULL;\n"
         "    for (int i = 1; i < argc; i++) {\n"
         "        if (strcmp(argv[i], \"--port\") == 0 && i + 1 < argc) {\n"
         "            port = atoi(argv[++i]);\n"
@@ -392,6 +403,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            rate_per_min = atoi(argv[++i]);\n"
         "        } else if (strcmp(argv[i], \"--secure\") == 0) {\n"
         "            secure = 1;\n"
+        "        } else if (strcmp(argv[i], \"--db\") == 0 && i + 1 < argc) {\n"
+        "            db_path = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
@@ -399,6 +412,13 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            fprintf(stderr, \"cweb: unknown option %s\\n\", argv[i]);\n"
         "            return 2;\n"
         "        }\n"
+        "    }\n"
+        "    if (db_path != NULL) {\n"
+        "        if (cweb_db_open(&cweb_database_impl, db_path) != 0) {\n"
+        "            fprintf(stderr, \"cweb: cannot open db %s\\n\", db_path);\n"
+        "            return 1;\n"
+        "        }\n"
+        "        cweb_database_open = 1;\n"
         "    }\n"
         "    if (net_init() != 0) {\n"
         "        fprintf(stderr, \"cweb: net_init failed\\n\");\n"
@@ -507,6 +527,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    http_session_store_free(&cweb_sessions);\n"
         "    router_free(&r);\n"
         "    net_cleanup();\n"
+        "    if (cweb_database_open) {\n"
+        "        cweb_db_close(&cweb_database_impl);\n"
+        "    }\n"
         "    return rc;\n"
         "}\n",
         f);
@@ -646,7 +669,8 @@ static int cmd_build(int argc, char **argv)
         "#define CWEB_PAGES_H\n\n"
         "#include \"request.h\"\n"
         "#include \"response.h\"\n"
-        "#include \"strmap.h\"\n\n"
+        "#include \"strmap.h\"\n"
+        "#include \"db.h\"\n\n"
         "/* one declaration per page. call another page as a partial from\n"
         " * any view: <?c page_x(req, res, params, user_data); ?> */\n",
         f);
@@ -655,7 +679,15 @@ static int cmd_build(int argc, char **argv)
                    "      Str_Map *params, void *user_data);\n",
                 names[i]);
     }
-    fputs("#endif\n", f);
+    fputs(
+        "\n"
+        "/* the store opened from the server's --db PATH, or NULL when the\n"
+        " * server ran without one. every page shares the same Cweb_Db, so\n"
+        " * <?c Cweb_Db *db = cweb_database(); ?> reads and writes persist\n"
+        " * between requests. check for NULL before touching it. */\n"
+        "Cweb_Db *cweb_database(void);\n"
+        "#endif\n",
+        f);
     fclose(f);
 
     char bin_path[512];
@@ -1054,8 +1086,9 @@ static void usage(FILE *f)
         "<?c cweb_tpl_layout_emit(res); ?> and so shapes every\n"
         "page (including the 404 page).\n"
         "The built OUT_DIR/server accepts --port N, --rate N (a per-client\n"
-        "budget of N requests a minute) and --secure (hardening headers on\n"
-        "every response).\n");
+        "budget of N requests a minute), --secure (hardening headers on\n"
+        "every response) and --db PATH (a file-backed key-value store pages\n"
+        "reach through cweb_database()).\n");
 }
 
 int main(int argc, char **argv)

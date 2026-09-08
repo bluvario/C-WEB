@@ -9,7 +9,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "db.h"
 #include "net.h"
+#include "sv.h"
 
 #define TOOL "./build/cweb"
 
@@ -153,6 +155,7 @@ int main(void)
                     strstr(main, "#include \"rate_limit.h\"") != NULL &&
                     strstr(main, "#include \"security.h\"") != NULL &&
                     strstr(main, "#include \"template.h\"") != NULL &&
+                    strstr(main, "#include \"db.h\"") != NULL &&
                     strstr(main, "cweb_tpl_capture_begin") != NULL &&
                     strstr(main, "static void cweb_wrap_hello(") != NULL &&
                     strstr(main, "static void cweb_wrap_fallback(") != NULL &&
@@ -160,6 +163,10 @@ int main(void)
                     strstr(main, "http_security_middleware") != NULL &&
                     strstr(main, "cweb_rate_key") != NULL &&
                     strstr(main, "--secure") != NULL &&
+                    strstr(main, "--db") != NULL &&
+                    strstr(main, "cweb_db_open(&cweb_database_impl, db_path)") != NULL &&
+                    strstr(main, "cweb_db_close(&cweb_database_impl)") != NULL &&
+                    strstr(main, "Cweb_Db *cweb_database(void)") != NULL &&
                     strstr(main, "void page_hello(Http_Request") == NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/hello\", cweb_wrap_hello, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_POST, \"/hello\", cweb_wrap_hello, &cweb_sessions);") != NULL &&
@@ -191,9 +198,11 @@ int main(void)
     main[pn] = '\0';
     fclose(f);
     int headers_ok = strstr(main, "#ifndef CWEB_PAGES_H") != NULL &&
+                     strstr(main, "#include \"db.h\"") != NULL &&
                      strstr(main, "void page_hello(Http_Request") != NULL &&
                      strstr(main, "void page_shout(Http_Request") != NULL &&
-                     strstr(main, "void page_layout(Http_Request") != NULL;
+                     strstr(main, "void page_layout(Http_Request") != NULL &&
+                     strstr(main, "Cweb_Db *cweb_database(void);") != NULL;
     free(main);
     if (!headers_ok) {
         fprintf(stderr, "generated pages.h is incomplete\n");
@@ -406,6 +415,124 @@ int main(void)
     free(app_body);
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
+
+    // --- --db PATH hands every page a persistent key-value store. a counter
+    //     page bumps a value it read from the store, which must survive both
+    //     the request boundary and a server restart ---
+    char dbviews[1024], dbvout[1024], dbbin[2048], dbfile[1024];
+    snprintf(dbviews, sizeof dbviews, "%s/dbviews", tmp);
+    mkdir(dbviews, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/db.c.html", dbviews);
+    wfile(wbuf,
+          "<?c\n"
+          "Cweb_Db *db = cweb_database();\n"
+          "if (db == NULL) {\n"
+          "    cweb_tpl_out(res, \"<p>no database configured</p>\");\n"
+          "    return;\n"
+          "}\n"
+          "String_View hits = cweb_db_get(db, sv_from_cstr(\"hits\"));\n"
+          "long long n = 0;\n"
+          "if (hits.data) {\n"
+          "    sv_to_i64(hits, &n);\n"
+          "}\n"
+          "n++;\n"
+          "char buf[32];\n"
+          "snprintf(buf, sizeof buf, \"%lld\", n);\n"
+          "cweb_db_put(db, sv_from_cstr(\"hits\"), sv_from_cstr(buf));\n"
+          "?><p>hits=<?c= buf ?></p>\n");
+    snprintf(dbvout, sizeof dbvout, "%s/dbvout", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s . \"\" >/dev/null",
+             TOOL, dbviews, dbvout);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the db app\n");
+        return 1;
+    }
+    snprintf(dbfile, sizeof dbfile, "%s/dbstore", tmp);
+    snprintf(dbbin, sizeof dbbin, "%s/server", dbvout);
+    probe = net_listen(0);
+    int db_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", db_port);
+    child = fork();
+    if (child == 0) {
+        execl(dbbin, "server", "--port", port_arg, "--db", dbfile, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(db_port) != 0) {
+        fprintf(stderr, "db server did not come up on port %d\n", db_port);
+        return 1;
+    }
+    char *dbbody = fetch(db_port, "/db");
+    int db_ok = dbbody != NULL && strstr(dbbody, "HTTP/1.1 200 OK") != NULL &&
+                strstr(dbbody, "<p>hits=1</p>") != NULL;
+    if (!db_ok) {
+        fprintf(stderr, "db counter start failed:\n%s\n", dbbody ? dbbody : "(connect error)");
+    }
+    free(dbbody);
+    dbbody = fetch(db_port, "/db");
+    db_ok = db_ok && dbbody != NULL &&
+            strstr(dbbody, "<p>hits=2</p>") != NULL;
+    if (!db_ok) {
+        fprintf(stderr, "db counter did not advance:\n%s\n", dbbody ? dbbody : "(connect error)");
+    }
+    free(dbbody);
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+
+    // the value was written to the file, not just held in memory
+    Cweb_Db reopen;
+    if (cweb_db_open(&reopen, dbfile) != 0) {
+        fprintf(stderr, "db file did not persist\n");
+        return 1;
+    }
+    String_View persisted = cweb_db_get(&reopen, sv_from_cstr("hits"));
+    db_ok = db_ok && sv_equal(persisted, sv_from_cstr("2"));
+    if (!db_ok) {
+        fprintf(stderr, "db file contents wrong\n");
+    }
+    cweb_db_close(&reopen);
+
+    // restart against the same file continues from where it stopped
+    child = fork();
+    if (child == 0) {
+        execl(dbbin, "server", "--port", port_arg, "--db", dbfile, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(db_port) != 0) {
+        fprintf(stderr, "db server did not come back up on port %d\n", db_port);
+        return 1;
+    }
+    dbbody = fetch(db_port, "/db");
+    db_ok = db_ok && dbbody != NULL && strstr(dbbody, "<p>hits=3</p>") != NULL;
+    if (!db_ok) {
+        fprintf(stderr, "db counter did not survive a restart:\n%s\n", dbbody ? dbbody : "(connect error)");
+    }
+    free(dbbody);
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+
+    // without --db the accessor stays NULL and the page's guard branch runs
+    child = fork();
+    if (child == 0) {
+        execl(dbbin, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(db_port) != 0) {
+        fprintf(stderr, "db-less server did not come up on port %d\n", db_port);
+        return 1;
+    }
+    dbbody = fetch(db_port, "/db");
+    db_ok = db_ok && dbbody != NULL && strstr(dbbody, "HTTP/1.1 200 OK") != NULL &&
+            strstr(dbbody, "no database configured") != NULL;
+    if (!db_ok) {
+        fprintf(stderr, "db-less server should render the guard branch:\n%s\n", dbbody ? dbbody : "(connect error)");
+    }
+    free(dbbody);
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+    if (!db_ok) {
+        return 1;
+    }
 
     // --- --rate caps each client at N requests a minute, --secure stamps
     //     hardening headers on every response including the 429s ---
