@@ -154,6 +154,14 @@ int main(void)
     }
     free(resp);
 
+    resp = request(port, "GET", "/nowhere", NULL, NULL);
+    ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 404") != NULL &&
+         strstr(resp, "text/html") != NULL && strstr(resp, "no such page") != NULL;
+    if (!ok) {
+        fprintf(stderr, "unknown paths should render the custom 404 page:\n%s\n", resp ? resp : "(connect error)");
+    }
+    free(resp);
+
     resp = request(port, "POST", "/login", NULL, "username=admin&password=nope");
     ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
          strstr(resp, "wrong") != NULL;

@@ -102,6 +102,8 @@ int main(void)
     wfile(wbuf, "<p>sub world</p>");
     snprintf(wbuf, sizeof wbuf, "%s/style.css", staticd);
     wfile(wbuf, "body { background: #fff; }");
+    snprintf(wbuf, sizeof wbuf, "%s/404.c.html", views);
+    wfile(wbuf, "<h1>Not found</h1>");
 
     // build the views into C and a server binary, mounting the static dir
     snprintf(wbuf, sizeof wbuf, "%s build %s %s . %s >/dev/null", TOOL, views, out, staticd);
@@ -113,7 +115,7 @@ int main(void)
     // the generated artifacts line up with the views
     char path[2048];
     const char *names[] = {"page_hello.c", "page_index.c", "page_world.c",
-                           "main.c", "server"};
+                           "page_404.c", "main.c", "server"};
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", out, names[i]);
         if (access(path, F_OK) != 0) {
@@ -138,7 +140,11 @@ int main(void)
                     strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL &&
-                    strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") != NULL;
+                    strstr(main, "router_add(&r, HTTP_GET, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_POST, \"*\", cweb_fallback, &cweb_sessions);") != NULL &&
+                    strstr(main, "static void cweb_fallback(") != NULL &&
+                    strstr(main, "http_serve_static(req, res, (void *)cweb_static_root);") != NULL &&
+                    strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") == NULL;
     free(main);
     if (!routes_ok) {
         fprintf(stderr, "generated main.c does not register the expected routes\n");
@@ -148,7 +154,7 @@ int main(void)
     // --routes lists them without binding a port
     snprintf(wbuf, sizeof wbuf, "%s/server --routes", out);
     FILE *pr = popen(wbuf, "r");
-    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0;
+    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0, has_404 = 0;
     if (pr != NULL) {
         char line[512];
         while (fgets(line, sizeof line, pr) != NULL) {
@@ -164,10 +170,13 @@ int main(void)
             if (strstr(line, "static: /*") != NULL) {
                 has_static = 1;
             }
+            if (strstr(line, "404: *") != NULL) {
+                has_404 = 1;
+            }
         }
         pclose(pr);
     }
-    if (!has_hello || !has_index || !has_world || !has_static) {
+    if (!has_hello || !has_index || !has_world || !has_static || !has_404) {
         fprintf(stderr, "--routes output incomplete\n");
         return 1;
     }
@@ -225,9 +234,10 @@ int main(void)
     free(body);
 
     body = fetch(port, "/nope");
-    ok = ok && body != NULL && strstr(body, "HTTP/1.1 404") != NULL;
+    ok = ok && body != NULL && strstr(body, "HTTP/1.1 404") != NULL &&
+         strstr(body, "<h1>Not found</h1>") != NULL;
     if (!ok) {
-        fprintf(stderr, "GET /nope should 404:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /nope should render the custom 404 page:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
