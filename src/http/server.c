@@ -1,8 +1,13 @@
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 
 #include "server.h"
 
 #include <ctype.h>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 #include <signal.h>
 #include <string.h>
 
@@ -161,6 +166,35 @@ static bool conn_keep_alive(Http_Request *req)
     return !close && (http11 || keep);
 }
 
+// caller's address as text, handed to every request on this connection via
+// req->remote; "0.0.0.0" stands in when the peer address cannot be resolved
+static String_View peer_ip(Socket_Handle client, char buf[INET6_ADDRSTRLEN])
+{
+#ifdef _WIN32
+    (void)client;
+    (void)buf;
+    return sv_from_cstr("0.0.0.0");
+#else
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    if (getpeername((int)client, (struct sockaddr *)&ss, &len) != 0) {
+        return sv_from_cstr("0.0.0.0");
+    }
+    const void *addr = NULL;
+    if (ss.ss_family == AF_INET) {
+        addr = &((struct sockaddr_in *)&ss)->sin_addr;
+    } else if (ss.ss_family == AF_INET6) {
+        addr = &((struct sockaddr_in6 *)&ss)->sin6_addr;
+    } else {
+        return sv_from_cstr("0.0.0.0");
+    }
+    if (inet_ntop(ss.ss_family, addr, buf, INET6_ADDRSTRLEN) == NULL) {
+        return sv_from_cstr("0.0.0.0");
+    }
+    return sv_from_cstr(buf);
+#endif
+}
+
 void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data)
 {
     Read_Buffer rb;
@@ -168,6 +202,9 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
     // a dawdling client must not pin a worker forever; this is also the
     // slowloris backstop
     net_set_timeout(client, REQUEST_TIMEOUT_MS);
+
+    char peer_buf[INET6_ADDRSTRLEN];
+    String_View remote = peer_ip(client, peer_buf);
 
     for (;;) {
         Request_Parse_Result pr;
@@ -233,6 +270,7 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         bool is_head = req.method == HTTP_HEAD;
         Http_Response res;
         http_response_init(&res);
+        req.remote = remote;
         unsigned long long t0 = time_mono_ms();
         handler(&req, &res, user_data);
         unsigned long long elapsed = time_mono_ms() - t0;

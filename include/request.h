@@ -30,6 +30,11 @@ typedef struct {
     // raw request bytes.
     String_View body;
 
+    // caller's IP address as text, filled in by the server for the lifetime
+    // of the connection; empty in hand-constructed requests. handy for
+    // middleware that keys on the client, like per-IP rate limiting.
+    String_View remote;
+
     Http_Header_Array headers;
 } Http_Request;
 
