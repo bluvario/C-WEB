@@ -18,6 +18,8 @@
 #include "response.h"
 #include "strbuf.h"
 #include "sv.h"
+#include "thread.h"
+#include "xmem.h"
 
 // 64 KiB is plenty for the requests we serve; anything bigger is a 413
 // TODO: stream the body to disk instead of hoarding it in RAM
@@ -225,6 +227,24 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
     rb_free(&rb);
 }
 
+// one accept -> one connection thread: a slow client must not stall everyone
+// else behind it. the job object owns the socket and is freed by the worker.
+typedef struct {
+    Socket_Handle client;
+    Http_Handler_Fn handler;
+    void *user_data;
+} Connection_Job;
+
+static void connection_worker(void *arg)
+{
+    Connection_Job *job = arg;
+    log_info("client connected");
+    http_serve_connection(job->client, job->handler, job->user_data);
+    net_close(job->client);
+    log_info("client done");
+    xfree(job);
+}
+
 int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
 {
     for (;;) {
@@ -234,10 +254,21 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
             log_error("accept failed: %s", net_error_string());
             continue;
         }
-        log_info("client connected");
-        http_serve_connection(client, handler, user_data);
-        net_close(client);
-        log_info("client done");
+
+        // TODO: cap thread-per-connection with a bounded pool later; for now
+        // detach and let the OS schedule. if spawning fails, serve in place
+        // rather than dropping the client.
+        Connection_Job *job = xmalloc(sizeof *job);
+        job->client = client;
+        job->handler = handler;
+        job->user_data = user_data;
+        Thread t;
+        if (thread_init(&t, connection_worker, job) == 0) {
+            thread_detach(&t);
+        } else {
+            log_error("thread spawn failed, serving inline");
+            connection_worker(job);
+        }
     }
     return 0; // unreachable
 }
