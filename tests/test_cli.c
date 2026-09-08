@@ -145,8 +145,11 @@ int main(void)
 
     int routes_ok = strstr(main, "#include \"pages.h\"") != NULL &&
                     strstr(main, "#include \"rate_limit.h\"") != NULL &&
+                    strstr(main, "#include \"security.h\"") != NULL &&
                     strstr(main, "http_rate_limit_middleware") != NULL &&
+                    strstr(main, "http_security_middleware") != NULL &&
                     strstr(main, "cweb_rate_key") != NULL &&
+                    strstr(main, "--secure") != NULL &&
                     strstr(main, "void page_hello(Http_Request") == NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_POST, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
@@ -380,14 +383,15 @@ int main(void)
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
 
-    // --- --rate caps each client at N requests a minute ---
+    // --- --rate caps each client at N requests a minute, --secure stamps
+    //     hardening headers on every response including the 429s ---
     probe = net_listen(0);
     int rl_port = net_bound_port(probe);
     net_close(probe);
     snprintf(port_arg, sizeof port_arg, "%d", rl_port);
     child = fork();
     if (child == 0) {
-        execl(path, "server", "--port", port_arg, "--rate", "2", NULL);
+        execl(path, "server", "--port", port_arg, "--rate", "2", "--secure", NULL);
         _exit(127);
     }
     if (wait_for_port(rl_port) != 0) {
@@ -396,25 +400,32 @@ int main(void)
         waitpid(child, NULL, 0);
         return 1;
     }
-    int rl_ok = 0, rl_429 = 0;
+    int rl_ok = 0, rl_ok_secure = 0, rl_429 = 0, rl_429_secure = 0;
     for (int i = 0; i < 10; i++) {
         char *rl_body = fetch(rl_port, "/");
         if (rl_body == NULL) {
             continue;
         }
+        int hard = strstr(rl_body, "X-Content-Type-Options: nosniff") != NULL &&
+                   strstr(rl_body, "X-Frame-Options: DENY") != NULL &&
+                   strstr(rl_body, "Content-Security-Policy: ") != NULL;
         if (strstr(rl_body, "HTTP/1.1 200 OK") != NULL) {
             rl_ok++;
+            rl_ok_secure += hard;
         } else if (strstr(rl_body, "429") != NULL) {
             rl_429++;
+            rl_429_secure += hard;
         }
         free(rl_body);
     }
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
-    if (rl_ok < 1 || rl_429 < 5) {
+    if (rl_ok_secure < 1 || rl_429_secure < 1 || rl_429 < 5) {
         fprintf(stderr,
-                "--rate should let a few requests through then answer 429 "
-                "(got %d ok, %d rate-limited)\n", rl_ok, rl_429);
+                "--rate/--secure should pass a few requests (with hardening "
+                "headers), then answer 429 (also hardened); got %d ok (%d "
+                "hardened), %d rate-limited (%d hardened)\n",
+                rl_ok, rl_ok_secure, rl_429, rl_429_secure);
         return 1;
     }
 

@@ -14,6 +14,14 @@ static int check(const char *what, int cond)
     return 0;
 }
 
+// tail handler for the middleware test: proves control reached the next link
+static void recorder(Http_Request *req, Http_Response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    http_response_set_status(res, HTTP_200_OK);
+}
+
 int main(void)
 {
     int fails = 0;
@@ -62,6 +70,34 @@ int main(void)
         strstr(w2.items, "default-src 'self'") == NULL);
     http_response_free(&res);
     strbuf_free(&w2);
+
+    // the middleware stamps the same headers, then hands control onward
+    http_response_init(&res);
+    http_security_middleware(NULL, &res, NULL, recorder, NULL);
+    Strbuf w3;
+    strbuf_init(&w3);
+    http_response_serialize(&res, &w3);
+    strbuf_null_terminate(&w3);
+    fails += check("middleware stamps hardening headers",
+        res.status == HTTP_200_OK &&
+        strstr(w3.items, "X-Content-Type-Options: nosniff\r\n") != NULL &&
+        strstr(w3.items, "X-Frame-Options: DENY\r\n") != NULL &&
+        strstr(w3.items, "Content-Security-Policy: ") != NULL);
+    http_response_free(&res);
+    strbuf_free(&w3);
+
+    // a user_data csp override flows through the middleware unchanged
+    http_response_init(&res);
+    http_security_middleware(NULL, &res, "default-src 'none'; upgrade-insecure-requests",
+                             recorder, NULL);
+    Strbuf w4;
+    strbuf_init(&w4);
+    http_response_serialize(&res, &w4);
+    strbuf_null_terminate(&w4);
+    fails += check("middleware honors the csp override",
+        strstr(w4.items, "Content-Security-Policy: default-src 'none'; upgrade-insecure-requests\r\n") != NULL);
+    http_response_free(&res);
+    strbuf_free(&w4);
 
     if (fails == 0) {
         printf("security ok\n");
