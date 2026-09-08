@@ -237,6 +237,30 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
+    // OPTIONS advertises what a path supports without running anything
+    e.called = 0;
+    http_request_parse(&req, sv_from_cstr("OPTIONS /echo HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &router);
+    if (res.status != HTTP_200_OK) {
+        fprintf(stderr, "OPTIONS should be 200, got %d\n", (int)res.status);
+        return 1;
+    }
+    if (e.called) {
+        fprintf(stderr, "OPTIONS must not run the GET handler\n");
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Allow: GET\r\n") == NULL) {
+        fprintf(stderr, "OPTIONS missing Allow header:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
     router_free(&router);
     printf("router ok\n");
     return 0;

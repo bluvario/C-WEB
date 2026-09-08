@@ -121,12 +121,20 @@ void router_dispatch(Http_Request *req, Http_Response *res, void *user_data)
     }
 
     if (path_found) {
-        http_response_set_status(res, HTTP_405_METHOD_NOT_ALLOWED);
-        http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
-        if (allow_len > 0) {
-            http_response_set_header(res, "Allow", allow);
+        if (req->method == HTTP_OPTIONS) {
+            // OPTIONS asks what a resource allows, not for the resource
+            http_response_set_status(res, HTTP_200_OK);
+            if (allow_len > 0) {
+                http_response_set_header(res, "Allow", allow);
+            }
+        } else {
+            http_response_set_status(res, HTTP_405_METHOD_NOT_ALLOWED);
+            http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
+            if (allow_len > 0) {
+                http_response_set_header(res, "Allow", allow);
+            }
+            http_response_add_body_cstr(res, "405 method not allowed");
         }
-        http_response_add_body_cstr(res, "405 method not allowed");
     } else {
         http_response_set_status(res, HTTP_404_NOT_FOUND);
         http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
