@@ -24,8 +24,8 @@ build/cweb: tools/cweb.c build/libcweb.a
 	$(CC) $(CFLAGS) -Iinclude -o $@ tools/cweb.c build/libcweb.a
 
 # the login example, compiled and linked entirely through the cweb CLI
-build/examples/login/server: build/cweb $(wildcard examples/login/views/*.c.html)
-	./build/cweb build examples/login/views build/examples/login .
+build/examples/login/server: build/cweb $(wildcard examples/login/views/*.c.html) $(wildcard examples/login/static/*)
+	./build/cweb build examples/login/views build/examples/login . examples/login/static
 
 examples: build/examples/login/server
 	@./build/examples/login/server --routes

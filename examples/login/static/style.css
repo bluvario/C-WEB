@@ -1,0 +1,33 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 36rem;
+  margin: 3rem auto;
+  padding: 0 1rem;
+  color: #222;
+}
+
+h1 {
+  border-bottom: 2px solid #bcd;
+  padding-bottom: .4rem;
+}
+
+form label {
+  display: block;
+  margin: .6rem 0;
+}
+
+form input {
+  margin-left: .4rem;
+  padding: .3rem;
+}
+
+form button {
+  margin-top: .6rem;
+  padding: .4rem .9rem;
+  font-size: 1rem;
+}
+
+p.error {
+  color: #a00;
+  font-weight: bold;
+}

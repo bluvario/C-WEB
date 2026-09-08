@@ -19,7 +19,7 @@ static void nap(void)
     nanosleep(&ts, NULL);
 }
 
-static char wbuf[2048];
+static char wbuf[4096];
 
 static void wfile(const char *path, const char *data)
 {
@@ -85,12 +85,14 @@ int main(void)
         perror("mkdtemp");
         return 1;
     }
-    char views[512], out[1024], sub[1024];
+    char views[512], out[1024], sub[1024], staticd[1024];
     snprintf(views, sizeof views, "%s/views", tmp);
     snprintf(out, sizeof out, "%s/out", tmp);
     snprintf(sub, sizeof sub, "%s/sub", views);
+    snprintf(staticd, sizeof staticd, "%s/static", tmp);
     mkdir(views, 0755);
     mkdir(sub, 0755);
+    mkdir(staticd, 0755);
 
     snprintf(wbuf, sizeof wbuf, "%s/hello.c.html", views);
     wfile(wbuf, "<h1>Hello</h1>");
@@ -98,9 +100,11 @@ int main(void)
     wfile(wbuf, "<h1>Index</h1>");
     snprintf(wbuf, sizeof wbuf, "%s/world.c.html", sub);
     wfile(wbuf, "<p>sub world</p>");
+    snprintf(wbuf, sizeof wbuf, "%s/style.css", staticd);
+    wfile(wbuf, "body { background: #fff; }");
 
-    // build the views into C and a server binary
-    snprintf(wbuf, sizeof wbuf, "%s build %s %s . >/dev/null", TOOL, views, out);
+    // build the views into C and a server binary, mounting the static dir
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s . %s >/dev/null", TOOL, views, out, staticd);
     if (system(wbuf) != 0) {
         fprintf(stderr, "cweb build failed\n");
         return 1;
@@ -133,7 +137,8 @@ int main(void)
                     strstr(main, "router_add(&r, HTTP_POST, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, &cweb_sessions);") != NULL &&
                     strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, &cweb_sessions);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL;
+                    strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL &&
+                    strstr(main, "http_static_mount(&r, \"\", cweb_static_root);") != NULL;
     free(main);
     if (!routes_ok) {
         fprintf(stderr, "generated main.c does not register the expected routes\n");
@@ -143,7 +148,7 @@ int main(void)
     // --routes lists them without binding a port
     snprintf(wbuf, sizeof wbuf, "%s/server --routes", out);
     FILE *pr = popen(wbuf, "r");
-    int has_hello = 0, has_index = 0, has_world = 0;
+    int has_hello = 0, has_index = 0, has_world = 0, has_static = 0;
     if (pr != NULL) {
         char line[512];
         while (fgets(line, sizeof line, pr) != NULL) {
@@ -156,10 +161,13 @@ int main(void)
             if (strstr(line, "/sub/world") != NULL) {
                 has_world = 1;
             }
+            if (strstr(line, "static: /*") != NULL) {
+                has_static = 1;
+            }
         }
         pclose(pr);
     }
-    if (!has_hello || !has_index || !has_world) {
+    if (!has_hello || !has_index || !has_world || !has_static) {
         fprintf(stderr, "--routes output incomplete\n");
         return 1;
     }
@@ -220,6 +228,14 @@ int main(void)
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 404") != NULL;
     if (!ok) {
         fprintf(stderr, "GET /nope should 404:\n%s\n", body ? body : "(connect error)");
+    }
+    free(body);
+
+    body = fetch(port, "/style.css");
+    ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
+         strstr(body, "text/css") != NULL && strstr(body, "#fff") != NULL;
+    if (!ok) {
+        fprintf(stderr, "GET /style.css should come from the static mount:\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 

@@ -108,9 +108,9 @@ int main(void)
         return 1;
     }
 
-    // compile the example with the CLI
+    // compile the example with the CLI, mounting its static dir
     char cmd[1024];
-    snprintf(cmd, sizeof cmd, "%s build examples/login/views %s . >/dev/null", TOOL, tmp);
+    snprintf(cmd, sizeof cmd, "%s build examples/login/views %s . examples/login/static >/dev/null", TOOL, tmp);
     if (system(cmd) != 0) {
         fprintf(stderr, "cweb build failed for the login example\n");
         return 1;
@@ -139,9 +139,18 @@ int main(void)
 
     resp = request(port, "GET", "/login", NULL, NULL);
     ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
-         strstr(resp, "<form") != NULL && strstr(resp, "admin / secret") != NULL;
+         strstr(resp, "<form") != NULL && strstr(resp, "admin / secret") != NULL &&
+         strstr(resp, "/style.css") != NULL;
     if (!ok) {
         fprintf(stderr, "login form fetch failed:\n%s\n", resp ? resp : "(connect error)");
+    }
+    free(resp);
+
+    resp = request(port, "GET", "/style.css", NULL, NULL);
+    ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+         strstr(resp, "text/css") != NULL && strstr(resp, "system-ui") != NULL;
+    if (!ok) {
+        fprintf(stderr, "stylesheet should be served from the static mount:\n%s\n", resp ? resp : "(connect error)");
     }
     free(resp);
 
