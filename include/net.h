@@ -20,6 +20,10 @@ int net_bound_port(Socket_Handle listener);
 Socket_Handle net_accept(Socket_Handle listener);
 // blocking tcp connect to host:port ("127.0.0.1" style, no DNS yet)
 Socket_Handle net_connect(const char *host, int port);
+// blocking tcp connect that resolves names through getaddrinfo, trying each
+// address the resolution hands back. -1 when none of them connect, in which
+// case net_error_string explains the last one.
+Socket_Handle net_connect_host(const char *host, int port);
 
 // bytes read, 0 on an orderly close, -1 on error. after net_set_timeout a
 // read that sits empty for the budget comes back as NET_READ_TIMEOUT.

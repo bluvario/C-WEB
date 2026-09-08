@@ -3,6 +3,7 @@
 #include "net.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -14,6 +15,7 @@ typedef SOCKET raw_socket;
 #else
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -160,6 +162,41 @@ Socket_Handle net_connect(const char *host, int port)
     }
     return (Socket_Handle)fd;
 }
+
+#if defined(_WIN32) || defined(_POSIX_C_SOURCE)
+Socket_Handle net_connect_host(const char *host, int port)
+{
+    // getaddrinfo resolves names and literals, v4 and v6 alike; try every
+    // address it hands back until one connects (say, a host with both stacks)
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0) {
+        set_err("getaddrinfo() failed");
+        return -1;
+    }
+    for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+        raw_socket fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!raw_valid(fd)) {
+            continue;
+        }
+        if (connect(fd, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
+            freeaddrinfo(res);
+            return (Socket_Handle)fd;
+        }
+        raw_close(fd);
+    }
+    freeaddrinfo(res);
+    set_err("connect() failed");
+    return -1;
+}
+#endif
 
 long net_recv(Socket_Handle sock, void *buf, size_t len)
 {

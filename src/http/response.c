@@ -172,10 +172,6 @@ void http_response_serialize_head(Http_Response *res, Strbuf *out)
     strbuf_append_cstr(out, res->keep_alive ? "Connection: keep-alive\r\n"
                                              : "Connection: close\r\n");
     strbuf_append_cstr(out, "\r\n");
-
-    if (!status_has_no_body && !res->suppress_body && res->stream_fn == NULL) {
-        strbuf_append(out, res->body.items, res->body.count);
-    }
 }
 
 void http_response_serialize(Http_Response *res, Strbuf *out)

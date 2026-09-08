@@ -39,6 +39,16 @@ int main(void)
     }
     fails += check("200 response wire format", 1);
 
+    // regression: the body must land in the wire exactly once. a refactor
+    // once appended it both in serialize and in the head writer, doubling it.
+    size_t greps = 0;
+    for (size_t i = 0; i + 4 < wire.count; i++) {
+        if (memcmp(&wire.items[i], "hello", 5) == 0) {
+            greps++;
+        }
+    }
+    fails += check("body emitted exactly once", greps == 1);
+
     // serialized responses carry a usable RFC 7231 Date stamp in IMF-fixdate
     // shape: "Tue, 08 Sep 2026 12:49:36 GMT"
     const char *date = strstr(wire.items, "Date: ");
