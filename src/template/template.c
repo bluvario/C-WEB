@@ -218,17 +218,8 @@ int cweb_template_to_c(String_View source, const char *fn_name,
     return rc;
 }
 
-int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err)
+void cweb_template_page_name(const char *path, char *out, size_t out_size)
 {
-    char *data;
-    size_t len;
-    if (file_read_all(path, &data, &len) != 0) {
-        if (err) {
-            strbuf_append_cstr(err, "cannot read template");
-        }
-        return -1;
-    }
-
     // page_hello from "views/hello.c.html": strip any directory part and the
     // suffix, then slug the stem into an identifier
     const char *base = strrchr(path, '/');
@@ -240,8 +231,8 @@ int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err)
         sl -= 5;
     }
 
-    // the page_ prefix (and a fallback name) keep the identifier valid even
-    // when the stem starts with a digit or is empty
+    // the page_ prefix keeps the identifier valid even when the stem starts
+    // with a digit or is empty
     char stem[96];
     size_t n;
     if (sl == 0) {
@@ -260,8 +251,22 @@ int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err)
         }
     }
 
+    snprintf(out, out_size, "page_%s", stem);
+}
+
+int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err)
+{
+    char *data;
+    size_t len;
+    if (file_read_all(path, &data, &len) != 0) {
+        if (err) {
+            strbuf_append_cstr(err, "cannot read template");
+        }
+        return -1;
+    }
+
     char name[104];
-    snprintf(name, sizeof name, "page_%s", stem);
+    cweb_template_page_name(path, name, sizeof name);
 
     int rc = cweb_template_to_c((String_View){data, len}, name, out, err);
     xfree(data);
