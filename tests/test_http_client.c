@@ -105,6 +105,27 @@ static void close_handler(Http_Request *req, Http_Response *res,
     http_response_set_header(res, "Connection", "close");
 }
 
+// bodyless statuses: the head carries no length and the connection stays
+// open, so a client waiting for body bytes would hang
+static void empty_handler(Http_Request *req, Http_Response *res,
+                          Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_set_status(res, HTTP_204_NO_CONTENT);
+}
+
+static void stale_handler(Http_Request *req, Http_Response *res,
+                          Str_Map *params, void *user_data)
+{
+    (void)req;
+    (void)params;
+    (void)user_data;
+    http_response_set_status(res, HTTP_304_NOT_MODIFIED);
+    http_response_set_header(res, "ETag", "\"deadbeef\"");
+}
+
 static void final_handler(Http_Request *req, Http_Response *res,
                           Str_Map *params, void *user_data)
 {
@@ -181,6 +202,8 @@ int main(void)
     router_add(&router, HTTP_POST, "/echo", echo_handler, NULL);
     router_add(&router, HTTP_GET, "/chunks", chunk_handler, NULL);
     router_add(&router, HTTP_GET, "/close", close_handler, NULL);
+    router_add(&router, HTTP_GET, "/empty204", empty_handler, NULL);
+    router_add(&router, HTTP_GET, "/stale304", stale_handler, NULL);
     router_add(&router, HTTP_GET, "/final", final_handler, NULL);
     router_add(&router, HTTP_GET, "/redir", redir_handler, NULL);
     router_add(&router, HTTP_GET, "/rel", relredir_handler, NULL);
@@ -304,6 +327,31 @@ int main(void)
     fails += check("followup after HEAD on the same socket",
                    http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
     fails += check("still one connection after HEAD", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    // 204 and 304 send a head without any length and hold the connection
+    // open; the client must not wait for body bytes that will never arrive
+    fails += check("204 succeeds",
+                   http_client_req_get(pc, "/empty204", &r) == 0 &&
+                   r.status == HTTP_204_NO_CONTENT);
+    fails += check("204 has no body", r.body.count == 0);
+    fails += check("204 socket still live", http_client_keepalive_active(pc));
+    fails += check("204 kept one connection", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    fails += check("304 succeeds",
+                   http_client_req_get(pc, "/stale304", &r) == 0 &&
+                   r.status == HTTP_304_NOT_MODIFIED);
+    fails += check("304 has no body", r.body.count == 0);
+    fails += check("304 headers kept",
+                   find_bytes(r.headers.items, r.headers.count, "ETag: \"deadbeef\"\r\n"));
+    fails += check("304 socket still live", http_client_keepalive_active(pc));
+    fails += check("304 kept one connection", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    fails += check("followup after 304 on the same socket",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("still one connection after bodyless", http_client_connection_opens(pc) == 1);
     http_client_result_free(&r);
 
     // chunked responses must leave the socket in sync for the next request

@@ -484,8 +484,13 @@ static int read_response(Http_Client *c, Http_Method method,
     size_t body_consumed = 0;
 
     // a HEAD response declares lengths that it will never deliver, so there is
-    // no body to read regardless of Content-Length or framing
-    bool has_body = method != HTTP_HEAD;
+    // no body to read regardless of Content-Length or framing. the same goes
+    // for 204 and 304, whose head already omits any length: reading to EOF
+    // there would sit waiting on a keep-alive socket. the framing rules here
+    // mirror http_response_serialize_head.
+    bool has_body = method != HTTP_HEAD &&
+                    out->status != HTTP_204_NO_CONTENT &&
+                    out->status != HTTP_304_NOT_MODIFIED;
 
     if (has_body && head_has_token(head, "transfer-encoding", "chunked")) {
         Chunk_Reader cr;
