@@ -433,8 +433,8 @@ static bool too_big(const Strbuf *b)
 // when the framing makes the connection unreusable for the next request, and
 // *touched when any response byte arrived (a retry may only resend when
 // nothing came back at all).
-static int read_response(Http_Client *c, Http_Client_Result *out,
-                         bool *conn_dead, bool *touched)
+static int read_response(Http_Client *c, Http_Method method,
+                         Http_Client_Result *out, bool *conn_dead, bool *touched)
 {
     *conn_dead = false;
     *touched = false;
@@ -483,7 +483,11 @@ static int read_response(Http_Client *c, Http_Client_Result *out,
     size_t body_base = sep + 4;
     size_t body_consumed = 0;
 
-    if (head_has_token(head, "transfer-encoding", "chunked")) {
+    // a HEAD response declares lengths that it will never deliver, so there is
+    // no body to read regardless of Content-Length or framing
+    bool has_body = method != HTTP_HEAD;
+
+    if (has_body && head_has_token(head, "transfer-encoding", "chunked")) {
         Chunk_Reader cr;
         memset(&cr, 0, sizeof cr);
         size_t pos = body_base;
@@ -514,7 +518,7 @@ static int read_response(Http_Client *c, Http_Client_Result *out,
             xfree(err);
         }
         body_consumed = pos - body_base;
-    } else {
+    } else if (has_body) {
         long long cl = head_content_length(head);
         if (cl >= 0) {
             // wait out exactly the declared bytes so the socket stays in sync
@@ -740,7 +744,7 @@ static int do_request(Http_Client *c, const char *raw, Http_Method method,
 
         bool conn_dead = false;
         bool touched = false;
-        int r = read_response(c, out, &conn_dead, &touched);
+        int r = read_response(c, method, out, &conn_dead, &touched);
         if (r != 0) {
             net_close(c->sock);
             c->sock = -1;

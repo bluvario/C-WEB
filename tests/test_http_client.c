@@ -286,6 +286,26 @@ int main(void)
     fails += check("still exactly one connection", http_client_connection_opens(pc) == 1);
     http_client_result_free(&r);
 
+    // HEAD declares a Content-Length it never delivers; the client must not
+    // wait for body bytes and must keep the socket in sync for the next call
+    fails += check("HEAD succeeds",
+                   http_client_req(pc, "/echo", HTTP_HEAD, NULL,
+                                   (String_View){0}, &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("HEAD has no body", r.body.count == 0);
+    char head_cl[64];
+    snprintf(head_cl, sizeof(head_cl), "Content-Length: %zu\r\n",
+             strlen("echo:/echo|||none"));
+    fails += check("HEAD advertises the real length",
+                   find_bytes(r.headers.items, r.headers.count, head_cl));
+    fails += check("HEAD socket stays live", http_client_keepalive_active(pc));
+    fails += check("HEAD did not reopen", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
+    fails += check("followup after HEAD on the same socket",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    fails += check("still one connection after HEAD", http_client_connection_opens(pc) == 1);
+    http_client_result_free(&r);
+
     // chunked responses must leave the socket in sync for the next request
     fails += check("reuse chunked req",
                    http_client_req_get(pc, "/chunks", &r) == 0 && r.status == HTTP_200_OK);
