@@ -177,6 +177,8 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include \"http.h\"\n"
             "#include \"request.h\"\n"
             "#include \"response.h\"\n"
+            "#include \"params.h\"\n"
+            "#include \"session.h\"\n"
             "#include \"strmap.h\"\n"
             "#include \"strbuf.h\"\n"
             "#include \"sv.h\"\n\n");

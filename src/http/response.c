@@ -58,6 +58,38 @@ void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_
     res->suppress_body = false;
 }
 
+// header text is "Name: value\r\n" lines; true when name (any case) already
+// appears at the start of a line
+static bool response_has_header(Http_Response *res, const char *name)
+{
+    size_t nn = strlen(name);
+    size_t at = 0;
+    while (at + nn < res->headers.count) {
+        size_t line_end = at;
+        while (line_end < res->headers.count &&
+               res->headers.items[line_end] != '\n') {
+            line_end++;
+        }
+        size_t line_len = line_end - at;
+        if (line_len >= nn &&
+            res->headers.items[at + nn] == ':') {
+            bool same = true;
+            for (size_t i = 0; i < nn; i++) {
+                if (tolower((unsigned char)res->headers.items[at + i]) !=
+                    tolower((unsigned char)name[i])) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+        at = line_end < res->headers.count ? line_end + 1 : res->headers.count;
+    }
+    return false;
+}
+
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location)
 {
     switch (status) {
@@ -73,10 +105,11 @@ void http_response_redirect(Http_Response *res, Http_Status status, const char *
 
     http_response_set_status(res, status);
     http_response_set_header(res, "Location", location);
-    http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
-    http_response_add_body_cstr(res, "redirecting to ");
-    http_response_add_body_cstr(res, location);
-    http_response_add_body_cstr(res, "\n");
+    // a handler may already have set a content type, only fill in the
+    // plain-text fallback when the response is still bare
+    if (!response_has_header(res, "Content-Type")) {
+        http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
+    }
 }
 
 void http_response_set_cors(Http_Response *res, const char *origin)

@@ -1,0 +1,22 @@
+<?c
+  Http_Session_Store *sessions = (Http_Session_Store *)user_data;
+  Http_Session *sesh = http_session_from_cookie(sessions, req, "cweb_session");
+?>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>C-WEB login example</title>
+</head>
+<body>
+  <h1>C-WEB login example</h1>
+<?c if (sesh) { ?>
+  <p>Hi <?h= sv_from_cstr(http_session_value(sesh, "username")) ?></p>
+  <form method="post" action="/logout">
+    <button>Log out</button>
+  </form>
+<?c } else { ?>
+  <p>You are not logged in.</p>
+  <p><a href="/login">Log in</a></p>
+<?c } ?>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<?c
+  Http_Session_Store *sessions = (Http_Session_Store *)user_data;
+  const String_View *cookie = http_request_get_header(req, "Cookie");
+  Str_Map jar;
+  strmap_init(&jar);
+  if (cookie != NULL) {
+      http_cookie_parse(&jar, *cookie);
+  }
+  const char *token = strmap_get_cstr(&jar, "cweb_session");
+  if (token != NULL) {
+      http_session_destroy(sessions, token);
+  }
+  strmap_free(&jar);
+  http_session_issue_cookie(res, "cweb_session", "", NULL);
+  http_response_redirect(res, HTTP_303_SEE_OTHER, "/");
+?>

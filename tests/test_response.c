@@ -98,7 +98,7 @@ int main(void)
     http_response_free(&res);
     strbuf_free(&wire);
 
-    // redirect wires up Location, a body and the right status line
+    // redirect wires up Location and the right status line, no body
     http_response_init(&res);
     http_response_redirect(&res, HTTP_302_FOUND, "/login");
     strbuf_init(&wire);
@@ -107,8 +107,8 @@ int main(void)
     if (strncmp(wire.items, "HTTP/1.1 302 Found\r\n", 20) != 0 ||
         strstr(wire.items, "Location: /login\r\n") == NULL ||
         strstr(wire.items, "Content-Type: text/plain; charset=utf-8\r\n") == NULL ||
-        strstr(wire.items, "Content-Length: 22\r\n") == NULL ||
-        strstr(wire.items, "redirecting to /login\n") == NULL) {
+        strstr(wire.items, "Content-Length: 0\r\n") == NULL ||
+        strstr(wire.items, "redirecting to") != NULL) {
         fprintf(stderr, "302 wire format wrong:\n%s\n", wire.items);
         return 1;
     }
@@ -122,6 +122,21 @@ int main(void)
     fails += check("bogus redirect status coerced to 302", res.status == HTTP_302_FOUND);
     fails += check("redirect keeps Location header",
                    strstr(res.headers.items, "Location: /home\r\n") != NULL);
+    http_response_free(&res);
+
+    // a redirect on a response that already carries a content type and a body
+    // must not duplicate them (a template page sets both up front)
+    http_response_init(&res);
+    http_response_set_header(&res, "Content-Type", "text/html; charset=utf-8");
+    http_response_add_body_cstr(&res, "form");
+    http_response_redirect(&res, HTTP_303_SEE_OTHER, "/");
+    if (strbuf_null_terminate(&res.headers) != 0) return 1;
+    const char *html_hdr = strstr(res.headers.items, "text/html");
+    fails += check("redirect keeps existing content type", html_hdr != NULL);
+    fails += check("redirect does not add a second content type",
+                   html_hdr != NULL && strstr(html_hdr + 9, "Content-Type:") == NULL);
+    fails += check("redirect keeps existing body",
+                   strstr(res.body.items, "form") != NULL && !strstr(res.body.items, "redirecting to"));
     http_response_free(&res);
 
     // CORS: a readable response and a cacheable preflight answer

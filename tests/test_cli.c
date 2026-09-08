@@ -129,10 +129,11 @@ int main(void)
     main[n] = '\0';
     fclose(f);
 
-    int routes_ok = strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, NULL);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, NULL);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, NULL);") != NULL &&
-                    strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, NULL);") != NULL;
+    int routes_ok = strstr(main, "router_add(&r, HTTP_GET, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_POST, \"/hello\", page_hello, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/sub/world\", page_world, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/index\", page_index, &cweb_sessions);") != NULL &&
+                    strstr(main, "router_add(&r, HTTP_GET, \"/\", page_index, &cweb_sessions);") != NULL;
     free(main);
     if (!routes_ok) {
         fprintf(stderr, "generated main.c does not register the expected routes\n");

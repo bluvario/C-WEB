@@ -1,0 +1,36 @@
+<?c
+  Http_Session_Store *sessions = (Http_Session_Store *)user_data;
+  const char *error = NULL;
+  if (req->method == HTTP_POST) {
+      const char *username = strmap_get_cstr(params, "username");
+      const char *password = strmap_get_cstr(params, "password");
+      if (username != NULL && password != NULL &&
+          strcmp(username, "admin") == 0 && strcmp(password, "secret") == 0) {
+          char *token = http_session_create(sessions, -1);
+          Http_Session *sesh = http_session_open(sessions, token);
+          http_session_set(sesh, "username", username);
+          http_session_issue_cookie(res, "cweb_session", token, NULL);
+          http_response_redirect(res, HTTP_303_SEE_OTHER, "/");
+          return;
+      }
+      error = "username or password is wrong";
+  }
+?>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Log in</title>
+</head>
+<body>
+  <h1>Log in</h1>
+<?c if (error) { ?>
+  <p style="color:#b00"><?h= sv_from_cstr(error) ?></p>
+<?c } ?>
+  <form method="post" action="/login">
+    <label>User <input type="text" name="username" autofocus></label>
+    <label>Password <input type="password" name="password"></label>
+    <button>Log in</button>
+  </form>
+  <p>demo credentials: admin / secret</p>
+</body>
+</html>

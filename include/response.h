@@ -39,9 +39,11 @@ void http_response_add_body_cstr(Http_Response *res, const char *text);
 // or assembled, not both.
 void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_data);
 
-// turns the response into a redirect: sets Location, a tiny plain-text body
-// and the given status. only 301/302/303/307/308 are valid redirect codes,
-// anything else quietly becomes a 302.
+// turns the response into a redirect: sets Location and the given status,
+// with no body (the client follows Location anyway). a plain-text
+// Content-Type is only filled in when the response is otherwise bare. only
+// 301/302/303/307/308 are valid redirect codes, anything else quietly
+// becomes a 302.
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location);
 
 // allows browser JavaScript from *origin to read this response ("*" opens it

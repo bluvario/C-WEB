@@ -6,6 +6,10 @@
 //   cweb serve views/         build into a scratch dir and run it
 //   cweb version
 //
+// every route answers GET and POST (the same handler, so pages branch on
+// req->method) and every page gets a shared Http_Session_Store as user_data,
+// so forms and login flows work out of the box.
+//
 // ROOT (default ".") is the project root holding include/ and build/libcweb.a,
 // so run the tool from there.
 
@@ -203,7 +207,12 @@ static void emit_main(FILE *f, const Str_List *views)
         "#include \"net.h\"\n"
         "#include \"router.h\"\n"
         "#include \"server.h\"\n"
+        "#include \"session.h\"\n"
         "#include \"strmap.h\"\n"
+        "\n"
+        "// one server-side session store for the whole process, handed to every\n"
+        "// page as user_data; sessions live for an hour of inactivity\n"
+        "static Http_Session_Store cweb_sessions;\n"
         "\n",
         f);
 
@@ -256,7 +265,8 @@ static void emit_main(FILE *f, const Str_List *views)
         "        return 1;\n"
         "    }\n"
         "    Http_Router r;\n"
-        "    router_init(&r);\n",
+        "    router_init(&r);\n"
+        "    http_session_store_init(&cweb_sessions, 3600);\n",
         f);
 
     for (size_t i = 0; i < views->count; i++) {
@@ -267,9 +277,15 @@ static void emit_main(FILE *f, const Str_List *views)
         fputc('"', f);
         emit_esc(f, route);
         fputc('"', f);
-        fprintf(f, ", %s, NULL);\n", name);
+        fprintf(f, ", %s, &cweb_sessions);\n", name);
+        fprintf(f, "    router_add(&r, HTTP_POST, ");
+        fputc('"', f);
+        emit_esc(f, route);
+        fputc('"', f);
+        fprintf(f, ", %s, &cweb_sessions);\n", name);
         if (ends_with_index(route)) {
-            fprintf(f, "    router_add(&r, HTTP_GET, \"/\", %s, NULL);\n", name);
+            fprintf(f, "    router_add(&r, HTTP_GET, \"/\", %s, &cweb_sessions);\n", name);
+            fprintf(f, "    router_add(&r, HTTP_POST, \"/\", %s, &cweb_sessions);\n", name);
         }
     }
 
@@ -282,6 +298,7 @@ static void emit_main(FILE *f, const Str_List *views)
         "        return 1;\n"
         "    }\n"
         "    int rc = http_serve(listener, router_dispatch, &r);\n"
+        "    http_session_store_free(&cweb_sessions);\n"
         "    router_free(&r);\n"
         "    net_cleanup();\n"
         "    return rc;\n"
@@ -297,6 +314,21 @@ static int die(const char *msg)
 {
     fprintf(stderr, "cweb: %s\n", msg);
     return 1;
+}
+
+// like mkdir -p: creates every missing directory on the way
+static void mkdir_p(const char *path)
+{
+    char tmp[4096];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *p = tmp + 1; *p != '\0'; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
 }
 
 static int cmd_build(int argc, char **argv)
@@ -342,7 +374,7 @@ static int cmd_build(int argc, char **argv)
         }
     }
 
-    mkdir(out_arg, 0755); // ignore EEXIST
+    mkdir_p(out_arg);
 
     // one generated .c per page, named after its handler for debuggability
     char gen[512];
