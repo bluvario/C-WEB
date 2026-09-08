@@ -1,10 +1,15 @@
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "http.h"
 #include "request.h"
 #include "response.h"
 #include "router.h"
+#include "static.h"
 #include "strbuf.h"
 #include "sv.h"
 
@@ -261,7 +266,98 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
-    router_free(&router);
+    // --- static mount ----------------------------------------------------
+    // a real file tree on disk, served from "/assets" by a prefix mount
+    (void)mkdir("build/mnt", 0755);
+    (void)mkdir("build/mnt/css", 0755);
+    FILE *idx = fopen("build/mnt/index.html", "w");
+    fprintf(idx, "<h1>Home</h1>\n");
+    fclose(idx);
+    FILE *app = fopen("build/mnt/css/app.css", "w");
+    fprintf(app, "body{color:red}\n");
+    fclose(app);
+
+    Http_Router site;
+    router_init(&site);
+    if (http_static_mount(&site, "/assets", "build/mnt") != 0) {
+        fprintf(stderr, "static mount failed\n");
+        return 1;
+    }
+
+    // mount root serves the directory index
+    http_request_parse(&req, sv_from_cstr("GET /assets HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_200_OK || strstr(res.body.items, "<h1>Home</h1>") == NULL) {
+        fprintf(stderr, "mount root should serve index.html\n");
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // trailing slash reaches the same index
+    http_request_parse(&req, sv_from_cstr("GET /assets/ HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_200_OK || strstr(res.body.items, "<h1>Home</h1>") == NULL) {
+        fprintf(stderr, "/assets/ should serve index.html\n");
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // the prefix is stripped: /assets/css/app.css reads css/app.css
+    http_request_parse(&req, sv_from_cstr("GET /assets/css/app.css HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_200_OK ||
+        strstr(res.body.items, "body{color:red}") == NULL ||
+        strstr(res.headers.items, "text/css") == NULL) {
+        fprintf(stderr, "nested asset under the mount should be served\n");
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a traversal attempt on a mount is an error, not a file read outside
+    http_request_parse(&req, sv_from_cstr("GET /assets/../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_400_BAD_REQUEST) {
+        fprintf(stderr, "traversal should be 400, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a missing file under the mount is a 404, not a fallthrough
+    http_request_parse(&req, sv_from_cstr("GET /assets/nope.txt HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_404_NOT_FOUND) {
+        fprintf(stderr, "missing asset should be 404, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // paths outside the mount still 404: the catch-all didn't grab them
+    http_request_parse(&req, sv_from_cstr("GET /assetsx/index.html HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    router_dispatch(&req, &res, &site);
+    if (res.status != HTTP_404_NOT_FOUND) {
+        fprintf(stderr, "similar-but-outside path should 404, got %d\n", (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    router_free(&site);
+    unlink("build/mnt/css/app.css");
+    unlink("build/mnt/index.html");
+    rmdir("build/mnt/css");
+    rmdir("build/mnt");
+
     printf("router ok\n");
     return 0;
 }

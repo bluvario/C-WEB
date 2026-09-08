@@ -10,6 +10,7 @@
 #include "path.h"
 #include "request.h"
 #include "response.h"
+#include "router.h"
 #include "strbuf.h"
 #include "sv.h"
 #include "url.h"
@@ -256,4 +257,56 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
 
     http_response_add_body(res, (String_View){data, len});
     xfree(data);
+}
+
+// --- prefix mounts -------------------------------------------------------
+
+// everything under url_prefix is peeled off the request path so the file
+// handler only ever sees the part meant for the disk root
+typedef struct {
+    char *url_prefix;
+    char *fs_root;
+} Static_Mount;
+
+static void http_static_mount_handler(Http_Request *req, Http_Response *res,
+                                      Str_Map *params, void *user_data)
+{
+    Static_Mount *m = user_data;
+    (void)params;
+
+    String_View original = req->path;
+    Strbuf sub;
+    strbuf_init(&sub);
+    size_t plen = strlen(m->url_prefix);
+    if (plen < req->path.count) {
+        strbuf_append(&sub, req->path.data + plen, req->path.count - plen);
+    }
+    if (sub.count == 0) {
+        strbuf_append_cstr(&sub, "/"); // the mount root itself
+    }
+    req->path = (String_View){sub.items, sub.count};
+    http_serve_static(req, res, m->fs_root);
+    strbuf_free(&sub);
+    req->path = original;
+}
+
+int http_static_mount(Http_Router *r, const char *url_prefix, const char *fs_root)
+{
+    // the mount outlives the calls, so its strings are owned copies and only
+    // freed when the process (and the router with it) goes away
+    Static_Mount *mount = xmalloc(sizeof *mount);
+    mount->url_prefix = xmalloc(strlen(url_prefix) + 1);
+    strcpy(mount->url_prefix, url_prefix);
+    mount->fs_root = xmalloc(strlen(fs_root) + 1);
+    strcpy(mount->fs_root, fs_root);
+
+    char pattern[1024];
+    int n = snprintf(pattern, sizeof(pattern), "%s/*", url_prefix);
+    if (n <= 0 || (size_t)n >= sizeof(pattern)) {
+        xfree(mount->url_prefix);
+        xfree(mount->fs_root);
+        xfree(mount);
+        return -1;
+    }
+    return router_add(r, HTTP_GET, pattern, http_static_mount_handler, mount);
 }

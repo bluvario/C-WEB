@@ -24,6 +24,14 @@ bool route_path_matches(const char *pattern, String_View path, Str_Map *params)
     for (;;) {
         String_View pseg = next_seg(&p);
         String_View qseg = next_seg(&q);
+
+        // a terminal "*" swallows whatever is left of the path, including
+        // nothing: "/a/*" matches "/a" and "/a/x/y". mid-pattern "*" is
+        // refused outright rather than given a meaning nobody asked for.
+        if (pseg.count == 1 && pseg.data[0] == '*') {
+            return next_seg(&p).count == 0;
+        }
+
         if (pseg.count == 0 || qseg.count == 0) {
             return pseg.count == 0 && qseg.count == 0;
         }

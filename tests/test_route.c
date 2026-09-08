@@ -46,6 +46,16 @@ int main(void)
     fails += check("empty placeholder rejected",
         !route_match((Route_Def){HTTP_GET, "/a/<>/b"}, HTTP_GET, sv_from_cstr("/a/x/b"), NULL));
 
+    Route_Def mount = {HTTP_GET, "/pub/*"};
+    fails += check("wildcard matches prefix", route_match(mount, HTTP_GET, sv_from_cstr("/pub"), NULL));
+    fails += check("wildcard matches one child", route_match(mount, HTTP_GET, sv_from_cstr("/pub/a"), NULL));
+    fails += check("wildcard matches deep child", route_match(mount, HTTP_GET, sv_from_cstr("/pub/a/b/c"), NULL));
+    fails += check("wildcard not a different prefix", !route_match(mount, HTTP_GET, sv_from_cstr("/pubx/a"), NULL));
+    fails += check("wildcard not a sibling", !route_match(mount, HTTP_GET, sv_from_cstr("/about"), NULL));
+    fails += check("mid-pattern wildcard refused",
+        !route_match((Route_Def){HTTP_GET, "/a/*/b"}, HTTP_GET, sv_from_cstr("/a/x/b"), NULL));
+    fails += check("root catch-all", route_match((Route_Def){HTTP_GET, "/*"}, HTTP_GET, sv_from_cstr("/x/y"), NULL));
+
     if (fails == 0) {
         printf("route ok\n");
     }
