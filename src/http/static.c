@@ -16,6 +16,14 @@
 #include "url.h"
 #include "xmem.h"
 
+// Cache-Control max-age for static answers, 0 = leave them uncached
+static unsigned long g_static_cache_max_age = 0;
+
+void http_static_set_cache(unsigned long max_age)
+{
+    g_static_cache_max_age = max_age;
+}
+
 static void reject(Http_Response *res, Http_Status status)
 {
     http_response_set_status(res, status);
@@ -197,6 +205,14 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
     snprintf(etag, sizeof(etag), "\"%08llx-%zx\"",
              (unsigned long long)mtime, fsize);
     http_response_set_header(res, "ETag", etag);
+
+    // "public" lets proxies hold copies too; the directive rides on every
+    // status this handler sends back, including a validating 304
+    if (g_static_cache_max_age > 0) {
+        char cc[64];
+        snprintf(cc, sizeof(cc), "public, max-age=%lu", g_static_cache_max_age);
+        http_response_set_header(res, "Cache-Control", cc);
+    }
 
     bool not_modified = false;
     const String_View *inm = http_request_get_header(req, "if-none-match");

@@ -270,6 +270,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    return cweb_database_open ? &cweb_database_impl : NULL;\n"
         "}\n"
         "\n"
+        "// Cache-Control max-age for the static root, from --static-cache\n"
+        "static unsigned long cweb_static_cache = 0;\n"
+        "\n"
         "// per-client bucket key when --rate is on: the caller's IP as text.\n"
         "// an empty remote (before the server fills it in) would route every\n"
         "// unidentified connection into one shared bucket, so this is only\n"
@@ -315,6 +318,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     }
     fputs("    if (cweb_static_root[0] != '\\0') "
           "printf(\"static: /* -> %s\\n\", cweb_static_root);\n",
+          f);
+    fputs("    if (cweb_static_cache > 0) "
+          "printf(\"static-cache: %lus\\n\", cweb_static_cache);\n",
           f);
     if (has_404) {
         fputs("    printf(\"404: * (fallback)\\n\");\n", f);
@@ -413,6 +419,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            db_path = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--log\") == 0 && i + 1 < argc) {\n"
         "            log_path = argv[++i];\n"
+        "        } else if (strcmp(argv[i], \"--static-cache\") == 0 && i + 1 < argc) {\n"
+        "            cweb_static_cache = strtoul(argv[++i], NULL, 10);\n"
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
@@ -493,6 +501,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
             "    }\n",
             f);
     }
+    fputs(
+        "    if (cweb_static_cache > 0) {\n"
+        "        http_static_set_cache(cweb_static_cache);\n"
+        "    }\n",
+        f);
     fputc('\n', f);
 
     fputs(
@@ -1121,8 +1134,10 @@ static void usage(FILE *f)
 "The built OUT_DIR/server accepts --port N, --rate N (a per-client\n"
          "budget of N requests a minute), --secure (hardening headers on\n"
          "every response), --gzip (compress compressible bodies), --db PATH\n"
-         "(a file-backed key-value store pages reach through cweb_database())\n"
-         "and --log FILE (append Common Log Format access lines to FILE).\n");
+         "(a file-backed key-value store pages reach through cweb_database()),\n"
+         "--static-cache SECONDS (Cache-Control max-age on static files, with\n"
+         "ETag and Last-Modified validators already answering 304) and\n"
+         "--log FILE (append Common Log Format access lines to FILE).\n");
 }
 
 int main(int argc, char **argv)

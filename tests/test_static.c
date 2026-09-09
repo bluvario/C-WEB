@@ -320,6 +320,54 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
+    // Cache-Control stays off until http_static_set_cache() says otherwise
+    http_request_parse(&req, sv_from_cstr("GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Cache-Control:") != NULL) {
+        fprintf(stderr, "static files should be uncached by default:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a configured max-age stamps every successful answer, 304 included
+    http_static_set_cache(300);
+    http_request_parse(&req, sv_from_cstr("GET /hello.txt HTTP/1.1\r\nHost: x\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Cache-Control: public, max-age=300\r\n") == NULL) {
+        fprintf(stderr, "200 should carry max-age after the toggle:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // a validating 304 from a cached client keeps the freshness directive
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nIf-None-Match: *\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (res.status != HTTP_304_NOT_MODIFIED ||
+        strstr(wire.items, "Cache-Control: public, max-age=300\r\n") == NULL) {
+        fprintf(stderr, "304 should keep the max-age directive:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
     rmdir(subdir.items);
     unlink(hello.items);
     unlink(indexf.items);

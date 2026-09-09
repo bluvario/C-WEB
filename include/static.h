@@ -12,6 +12,13 @@
 // drops straight into http_serve/router as a handler.
 void http_serve_static(Http_Request *req, Http_Response *res, void *user_data);
 
+// sets the Cache-Control max-age for files this handler serves, in seconds.
+// a max_age of 0 (the default) leaves static responses uncached. with a
+// positive value every successful answer -- 200, 206 and 304 alike -- carries
+// "Cache-Control: public, max-age=<n>", so clients reuse a copy instead of
+// re-fetching while it is still valid. call this before serving starts.
+void http_static_set_cache(unsigned long max_age);
+
 // mounts that handler on a router: requests under url_prefix (leading slash,
 // no trailing slash, e.g. "/assets") are served from the disk root with the
 // prefix stripped, so "/assets/css/app.css" reads root + "/css/app.css". the

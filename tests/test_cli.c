@@ -198,6 +198,8 @@ int main(void)
                     strstr(main, "--secure") != NULL &&
                     strstr(main, "--gzip") != NULL &&
                     strstr(main, "--log") != NULL &&
+                    strstr(main, "--static-cache") != NULL &&
+                    strstr(main, "http_static_set_cache(cweb_static_cache)") != NULL &&
                     strstr(main, "log_set_clf(clf_file)") != NULL &&
                     strstr(main, "--db") != NULL &&
                     strstr(main, "cweb_db_open(&cweb_database_impl, db_path)") != NULL &&
@@ -362,9 +364,10 @@ int main(void)
 
     body = fetch(port, "/style.css");
     ok = ok && body != NULL && strstr(body, "HTTP/1.1 200 OK") != NULL &&
-         strstr(body, "text/css") != NULL && strstr(body, "#fff") != NULL;
+         strstr(body, "text/css") != NULL && strstr(body, "#fff") != NULL &&
+         strstr(body, "Cache-Control:") == NULL;
     if (!ok) {
-        fprintf(stderr, "GET /style.css should come from the static mount:\n%s\n", body ? body : "(connect error)");
+        fprintf(stderr, "GET /style.css should come from the static mount (uncached):\n%s\n", body ? body : "(connect error)");
     }
     free(body);
 
@@ -724,6 +727,33 @@ int main(void)
     kill(gz_child, SIGTERM);
     waitpid(gz_child, NULL, 0);
     ok = ok && gz_plain_ok && gz_ok;
+
+    // --- --static-cache stamps Cache-Control on files the static root serves ---
+    probe = net_listen(0);
+    int sc_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", sc_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", out);
+    pid_t sc_child = fork();
+    if (sc_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--static-cache", "300", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(sc_port) != 0) {
+        fprintf(stderr, "static-cache server did not come up on port %d\n", sc_port);
+        return 1;
+    }
+    char *sc_wire = fetch(sc_port, "/style.css");
+    int sc_ok = sc_wire != NULL && strstr(sc_wire, "HTTP/1.1 200 OK") != NULL &&
+                strstr(sc_wire, "Cache-Control: public, max-age=300") != NULL;
+    if (!sc_ok) {
+        fprintf(stderr, "--static-cache must set Cache-Control on static files:\n%.120s\n",
+                sc_wire ? sc_wire : "(connect error)");
+    }
+    free(sc_wire);
+    kill(sc_child, SIGTERM);
+    waitpid(sc_child, NULL, 0);
+    ok = ok && sc_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];
