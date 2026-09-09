@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "cookie.h"
+#include "db.h"
 #include "request.h"
 #include "response.h"
 #include "strmap.h"
@@ -23,11 +24,25 @@ typedef struct {
     size_t count;
     size_t capacity;
     time_t default_ttl; // seconds http_session_create uses when ttl < 0, 0 = forever
+    Cweb_Db *db;        // optional backing store; NULL = in-memory only
 } Http_Session_Store;
 
 // not thread-safe: give the store a lock, or hold one store per worker thread.
 void http_session_store_init(Http_Session_Store *s, time_t default_ttl);
 void http_session_store_free(Http_Session_Store *s);
+
+// attaches a persistent backing store. every session is mirrored under a
+// "session-<token>" key as it changes, sessions that are not in memory are
+// loaded back from it on demand, and destroying or reaping a session removes
+// its key. freeing the store does NOT clear its keys: that is how logins
+// survive a server restart. pass NULL to detach.
+void http_session_store_set_db(Http_Session_Store *s, Cweb_Db *db);
+
+// writes every live session to the backing store now. sessions destroyed
+// earlier in this run already had their keys removed, so the db ends up with
+// exactly the sessions still alive in memory. call it just before shutdown so
+// logins survive a restart. no-op when the store has no backing db.
+void http_session_store_dump(Http_Session_Store *s);
 
 // creates a session with a fresh opaque token (hex of OS random bytes) and
 // adopts it into the store. ttl < 0 uses the store default. returns the token

@@ -226,6 +226,53 @@ int main(void)
     }
     free(resp);
 
+    // ---- session persistence: logins survive a server restart with --db ----
+    kill(child, SIGTERM);
+    waitpid(child, NULL, 0);
+
+    char db_path[512];
+    snprintf(db_path, sizeof db_path, "%s/login.db", tmp);
+    child = fork();
+    if (child == 0) {
+        execl(server_path, "server", "--port", port_arg, "--db", db_path, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(port) != 0) {
+        fprintf(stderr, "db server did not come up on port %d\n", port);
+        return 1;
+    }
+    // log in against the persistent store and keep the cookie
+    resp = request(port, "POST", "/login", NULL, "username=admin&password=secret");
+    ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 303") != NULL &&
+         strstr(resp, "Set-Cookie: cweb_session=") != NULL;
+    if (ok) {
+        char pcookie[128];
+        grab_session_cookie(resp, pcookie, sizeof pcookie);
+        free(resp);
+
+        // restart with the same db: the persisted cookie must still be valid
+        kill(child, SIGTERM);
+        waitpid(child, NULL, 0);
+        child = fork();
+        if (child == 0) {
+            execl(server_path, "server", "--port", port_arg, "--db", db_path, NULL);
+            _exit(127);
+        }
+        if (wait_for_port(port) != 0) {
+            fprintf(stderr, "db server did not come back up on port %d\n", port);
+            return 1;
+        }
+        char pcookie_header[160];
+        snprintf(pcookie_header, sizeof pcookie_header, "cweb_session=%s", pcookie);
+        resp = request(port, "GET", "/", pcookie_header, NULL);
+        ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+             strstr(resp, "Hi admin") != NULL;
+        if (!ok) {
+            fprintf(stderr, "a session cookie should survive a --db restart:\n%s\n", resp ? resp : "(connect error)");
+        }
+        free(resp);
+    }
+
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
     net_cleanup();

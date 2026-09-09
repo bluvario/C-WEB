@@ -426,7 +426,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    }\n"
         "    Http_Router r;\n"
         "    router_init(&r);\n"
-        "    http_session_store_init(&cweb_sessions, 3600);\n",
+        "    http_session_store_init(&cweb_sessions, 3600);\n"
+        "    // with --db the session store persists to it, so logins survive\n"
+        "    // a restart as long as the same database file is passed again\n"
+        "    if (cweb_database_open) {\n"
+        "        http_session_store_set_db(&cweb_sessions, &cweb_database_impl);\n"
+        "    }\n",
         f);
 
     for (size_t i = 0; i < views->count; i++) {
@@ -524,6 +529,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    } else {\n"
         "        rc = http_serve(listener, router_dispatch, &r);\n"
         "    }\n"
+        "    http_session_store_dump(&cweb_sessions);\n"
         "    http_session_store_free(&cweb_sessions);\n"
         "    router_free(&r);\n"
         "    net_cleanup();\n"
