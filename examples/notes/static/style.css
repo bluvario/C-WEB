@@ -1,0 +1,37 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 36rem;
+  margin: 3rem auto;
+  padding: 0 1rem;
+  color: #222;
+}
+
+header h1 {
+  border-bottom: 2px solid #bcd;
+  padding-bottom: .4rem;
+  margin: 0;
+}
+
+header p, footer {
+  color: #556;
+}
+
+form {
+  display: flex;
+  gap: .5rem;
+  margin: 1rem 0;
+}
+
+form input {
+  flex: 1;
+}
+
+.note {
+  border-left: 3px solid #bcd;
+  padding: .4rem .8rem;
+  background: #f7f9fb;
+}
+
+a {
+  color: #345;
+}

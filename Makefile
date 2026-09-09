@@ -4,7 +4,7 @@ PREFIX  ?= /usr/local
 
 LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/utils/base64.c src/utils/buffer.c src/utils/thread.c src/utils/thread_pool.c src/utils/json.c src/utils/uri.c src/security/escape.c src/security/path.c src/security/headers.c src/http/http.c src/http/net.c src/http/request.c src/http/response.c src/http/server.c src/http/date.c src/http/params.c src/http/mime.c src/http/static.c src/http/negotiate.c src/http/cookie.c src/http/multipart.c src/http/auth.c src/http/sse.c src/http/http_client.c src/http/proxy.c src/http/middleware.c src/http/session.c src/http/rate_limit.c src/routing/route.c src/routing/router.c src/template/template.c src/db/db.c
 
-TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_db test_cli test_login
+TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_db test_notes test_cli test_login
 
 DEPS := $(shell find include src -name '*.h')
 
@@ -26,12 +26,19 @@ build/cweb: tools/cweb.c build/libcweb.a
 	$(CC) $(CFLAGS) -Iinclude -o $@ tools/cweb.c build/libcweb.a
 
 # the login example, compiled and linked entirely through the cweb CLI
-build/examples/login/server: build/cweb $(wildcard examples/login/views/*.c.html) $(wildcard examples/login/static/*)
+build/examples/login/server: build/cweb $(wildcard examples/login/views/*.c.html) $(wildcard examples/login/views/partials/*.c.html) $(wildcard examples/login/static/*)
 	./build/cweb build examples/login/views build/examples/login . examples/login/static
 
-examples: build/examples/login/server
+# the notes example rides every server feature: layout wrapper, persistent
+# --db store, --secure hardening and a static mount
+build/examples/notes/server: build/cweb $(wildcard examples/notes/views/*.c.html) $(wildcard examples/notes/views/partials/*.c.html) $(wildcard examples/notes/static/*)
+	./build/cweb build examples/notes/views build/examples/notes . examples/notes/static
+
+examples: build/examples/login/server build/examples/notes/server
 	@./build/examples/login/server --routes
-	@echo "run it with:  ./build/examples/login/server --port 8080"
+	@echo "run it with:       ./build/examples/login/server --port 8080"
+	@./build/examples/notes/server --routes
+	@echo "run it with:       ./build/examples/notes/server --port 8080 --db notes.db --secure"
 
 test: build/cweb $(TESTS:%=build/tests/%)
 	@for t in $(TESTS); do ./build/tests/$$t || exit 1; done

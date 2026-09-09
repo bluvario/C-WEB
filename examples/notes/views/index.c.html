@@ -1,0 +1,47 @@
+<?c
+  Cweb_Db *db = cweb_database();
+  if (db == NULL) {
+?>
+  <p>Start this server with <code>--db notes.db</code> and your notes will
+  survive restarts.</p>
+<?c
+      return;
+  }
+  if (req->method == HTTP_POST) {
+      const char *note = strmap_get_cstr(params, "note");
+      if (note != NULL && note[0] != '\0') {
+          String_View count = cweb_db_get(db, sv_from_cstr("count"));
+          long long n = 0;
+          if (count.data) {
+              sv_to_i64(count, &n);
+          }
+          char key[32], val[32];
+          snprintf(key, sizeof key, "note-%lld", n);
+          snprintf(val, sizeof val, "%lld", n + 1);
+          cweb_db_put(db, sv_from_cstr(key), sv_from_cstr(note));
+          cweb_db_put(db, sv_from_cstr("count"), sv_from_cstr(val));
+          http_response_redirect(res, HTTP_303_SEE_OTHER, "/");
+          return;
+      }
+  }
+  String_View count = cweb_db_get(db, sv_from_cstr("count"));
+  long long n = 0;
+  if (count.data) {
+      sv_to_i64(count, &n);
+  }
+  char numbuf[32];
+  snprintf(numbuf, sizeof numbuf, "%lld", n);
+?>
+  <form method="post" action="/">
+    <label>Note <input type="text" name="note" autofocus></label>
+    <button>Pin it</button>
+  </form>
+  <p>you have <?c= numbuf ?> notes</p>
+<?c for (long long i = 0; i < n; i++) { ?>
+  <?c
+    char kbuf[32];
+    snprintf(kbuf, sizeof kbuf, "note-%lld", i);
+    String_View text = cweb_db_get(db, sv_from_cstr(kbuf));
+  ?>
+  <p class="note"><?h= text ?></p>
+<?c } ?>
