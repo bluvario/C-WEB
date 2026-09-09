@@ -118,6 +118,11 @@ static void remove_at(Http_Session_Store *s, size_t i)
     }
 }
 
+// serializes one live session into the backing db; the write-through helpers
+// (create, set, destroy) keep the record current moment to moment. defined
+// below, forward-declared so the early helpers can call it.
+static void session_to_db(const Http_Session_Store *s, size_t i);
+
 char *http_session_create(Http_Session_Store *s, time_t ttl)
 {
     char *tok = new_token();
@@ -132,9 +137,14 @@ char *http_session_create(Http_Session_Store *s, time_t ttl)
     }
     s->tokens[s->count] = tok;
     strmap_init(&s->sessions[s->count].data);
+    s->sessions[s->count].store = s;
     time_t t = ttl < 0 ? s->default_ttl : ttl;
     s->sessions[s->count].expires = t > 0 ? time(NULL) + t : 0;
     s->count++;
+    if (s->db != NULL) {
+        session_to_db(s, s->count - 1);
+        cweb_db_sync(s->db);
+    }
     return tok;
 }
 
@@ -142,9 +152,26 @@ char *http_session_create(Http_Session_Store *s, time_t ttl)
 // (the db-aware version below also loads uncached, persisted sessions.)
 Http_Session *http_session_open(Http_Session_Store *s, const char *token);
 
+// where sesh lives in the store's slot array, or SIZE_MAX if it is not one of
+// ours. wrote in front of set/destroy so they can mirror a single session.
+static size_t session_index(const Http_Session_Store *s, const Http_Session *sesh)
+{
+    if (s->sessions == NULL || sesh < s->sessions || sesh >= s->sessions + s->count) {
+        return SIZE_MAX;
+    }
+    return (size_t)(sesh - s->sessions);
+}
+
 void http_session_set(Http_Session *sesh, const char *key, const char *value)
 {
     strmap_set(&sesh->data, sv_from_cstr(key), sv_from_cstr(value));
+    if (sesh->store != NULL && sesh->store->db != NULL) {
+        size_t i = session_index(sesh->store, sesh);
+        if (i != SIZE_MAX) {
+            session_to_db(sesh->store, i);
+            cweb_db_sync(sesh->store->db);
+        }
+    }
 }
 
 const char *http_session_value(Http_Session *sesh, const char *key)
@@ -291,6 +318,7 @@ Http_Session *http_session_open(Http_Session_Store *s, const char *token)
         s->tokens[s->count] = xmalloc(strlen(token) + 1);
         strcpy(s->tokens[s->count], token);
         strmap_init(&s->sessions[s->count].data);
+        s->sessions[s->count].store = s;
         s->sessions[s->count].expires = 0;
         session_from_db(s->db, &s->sessions[s->count], token);
         i = s->count;
@@ -306,9 +334,10 @@ Http_Session *http_session_open(Http_Session_Store *s, const char *token)
     return &s->sessions[i];
 }
 
-// serializes every live session into the backing db. sessions that were
-// destroyed during this run already had their keys removed by remove_at, so
-// the db ends up with exactly the sessions that are still live in memory.
+// flushes every live session's record to the backing db. the store mirrors
+// every create/set immediately (write-through), and destroyed sessions have
+// their keys removed by remove_at, so this is a final belt-and-braces pass
+// for a clean shutdown rather than the only point of persistence.
 void http_session_store_dump(Http_Session_Store *s)
 {
     for (size_t i = 0; i < s->count; i++) {

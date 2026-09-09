@@ -213,8 +213,9 @@ int main(void)
         http_response_free(&res);
     }
 
-    // persistent store: a store's sessions survive a store free and a second
-    // store loading the same db file, and destroying removes the record
+    // write-through persistence: a db-backed store mirrors every create and
+    // set to its record immediately, so logins survive even an abrupt stop
+    // that never ran a dump, and destroy still removes the record
     {
         char dir[] = "/tmp/cweb_session_db_XXXXXX";
         fails += check("mkdtemp for session db", mkdtemp(dir) != NULL);
@@ -224,6 +225,7 @@ int main(void)
         Cweb_Db db;
         fails += check("db opens", cweb_db_open(&db, dbpath) == 0);
 
+        // "crash": create + set on a db-backed store, then free WITHOUT dump
         Http_Session_Store s;
         http_session_store_init(&s, 0);
         http_session_store_set_db(&s, &db);
@@ -231,33 +233,53 @@ int main(void)
         fails += check("created session with backing db", tok != NULL);
         Http_Session *sesh = http_session_open(&s, tok);
         http_session_set(sesh, "user", "alice");
-        http_session_store_dump(&s);
-
-        // the record is on disk under the session- prefixed key
+        http_session_set(sesh, "theme", "dark");
         char tok_copy[128];
         snprintf(tok_copy, sizeof tok_copy, "%s", tok);
+        http_session_store_free(&s); // no dump: the crash
+
+        // a fresh store on the same db finds the session AND its data, all
+        // pre-dump, proving create/set wrote through
+        Http_Session_Store s2;
+        http_session_store_init(&s2, 0);
+        http_session_store_set_db(&s2, &db);
+        Http_Session *loaded = http_session_open(&s2, tok_copy);
+        fails += check("created session survived a crash without dump", loaded != NULL);
+        fails += check("set() wrote the value through before the crash",
+            http_session_value(loaded, "user") != NULL &&
+            strcmp(http_session_value(loaded, "user"), "alice") == 0);
+        fails += check("second value mirrored too",
+            http_session_value(loaded, "theme") != NULL &&
+            strcmp(http_session_value(loaded, "theme"), "dark") == 0);
+
+        // the record is on disk under the session- prefixed key already
         char key[160];
         snprintf(key, sizeof key, "session-%s", tok_copy);
         fails += check("record mirrored to db",
             cweb_db_get(&db, sv_from_cstr(key)).data != NULL);
 
-        // a fresh store on the same db finds the session again
-        http_session_store_free(&s);
-        Http_Session_Store s2;
-        http_session_store_init(&s2, 0);
-        http_session_store_set_db(&s2, &db);
-        Http_Session *loaded = http_session_open(&s2, tok_copy);
-        fails += check("persisted session loads into a fresh store", loaded != NULL);
-        fails += check("persisted data is restored",
-            http_session_value(loaded, "user") != NULL &&
-            strcmp(http_session_value(loaded, "user"), "alice") == 0);
+        // mutate in the fresh store and "crash" again: set() mirrors through
+        http_session_set(loaded, "theme", "light");
+        http_session_store_free(&s2);
+
+        Http_Session_Store s3;
+        http_session_store_init(&s3, 0);
+        http_session_store_set_db(&s3, &db);
+        Http_Session *reloaded = http_session_open(&s3, tok_copy);
+        fails += check("updated value survived the second crash",
+            reloaded != NULL && http_session_value(reloaded, "theme") != NULL &&
+            strcmp(http_session_value(reloaded, "theme"), "light") == 0);
+        // the shutdown dump still works as a belt-and-braces flush
+        http_session_store_dump(&s3);
+        fails += check("dump leaves the record readable",
+            cweb_db_get(&db, sv_from_cstr(key)).data != NULL);
 
         // destroying removes the record so it cannot be resurrected
-        http_session_destroy(&s2, tok_copy);
+        http_session_destroy(&s3, tok_copy);
         fails += check("destroyed session's record is deleted",
             cweb_db_get(&db, sv_from_cstr(key)).data == NULL);
 
-        http_session_store_free(&s2);
+        http_session_store_free(&s3);
         cweb_db_close(&db);
         unlink(dbpath);
         rmdir(dir);
