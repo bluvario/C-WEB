@@ -1559,6 +1559,81 @@ int main(void)
     }
 
     ok = ok && app_ok && watch_ok;
+
+    // --- framework ROOT resolution: "cweb serve views PORT . static" works
+    //     from inside an app directory next to the checkout (the tool binary
+    //     lives in the checkout), and an unresolvable ROOT dies with a clear
+    //     message instead of a raw cc failure -------------------------------
+    char appdir[512], appviews[1024];
+    snprintf(appdir, sizeof appdir, "%s/appfrom", tmp);
+    mkdir(appdir, 0755);
+    snprintf(appviews, sizeof appviews, "%s/views", appdir);
+    mkdir(appviews, 0755);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", appviews);
+    wfile(wbuf, "<p>from an app dir</p>");
+    char abs_tool[2048], cwd_buf[1024];
+    getcwd(cwd_buf, sizeof cwd_buf);
+    snprintf(abs_tool, sizeof abs_tool, "%s/build/cweb", cwd_buf);
+
+    probe = net_listen(0);
+    int fr_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", fr_port);
+    pid_t fr_child = fork();
+    if (fr_child == 0) {
+        chdir(appdir);
+        // argv[0] carries the tool path, exactly like an invocation from a
+        // shell: the binary's own directory is the cweb checkout
+        execl(abs_tool, abs_tool, "serve", "views", port_arg, ".", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(fr_port) != 0) {
+        fprintf(stderr, "app-dir server did not come up on port %d\n", fr_port);
+        kill(fr_child, SIGTERM);
+        waitpid(fr_child, NULL, 0);
+        return 1;
+    }
+    char *fr_body = fetch(fr_port, "/");
+    int fr_ok = fr_body != NULL && strstr(fr_body, "HTTP/1.1 200 OK") != NULL &&
+                strstr(fr_body, "from an app dir") != NULL;
+    if (!fr_ok) {
+        fprintf(stderr, "serve from an app dir should find the framework via the binary:\n%.120s\n",
+                fr_body ? fr_body : "(connect error)");
+    }
+    free(fr_body);
+    kill(fr_child, SIGTERM);
+    waitpid(fr_child, NULL, 0);
+
+    // chdir below any possible checkout (no slash in argv[0], ancestors of
+    // this fresh tmp dir hold no include/), so resolution must fail loudly
+    char deep[512], derr[600];
+    snprintf(deep, sizeof deep, "%s/deep", tmp);
+    mkdir(deep, 0755);
+    snprintf(deep, sizeof deep, "%s/deep/sub", tmp);
+    mkdir(deep, 0755);
+    snprintf(derr, sizeof derr, "%s/deep/err.txt", tmp);
+    pid_t dchild = fork();
+    if (dchild == 0) {
+        chdir(deep);
+        int fd = open(derr, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+        execl(abs_tool, "cweb", "build", "nowhere-views", "nowhere-out", NULL);
+        _exit(127);
+    }
+    waitpid(dchild, NULL, 0);
+    FILE *df = fopen(derr, "r");
+    char *dbuf = malloc(4096);
+    size_t dn = fread(dbuf, 1, 4095, df);
+    dbuf[dn] = '\0';
+    fclose(df);
+    fr_ok = fr_ok && strstr(dbuf, "cannot find the cweb framework") != NULL;
+    if (!fr_ok) {
+        fprintf(stderr, "an unresolvable ROOT should die with a clear message:\n%s\n", dbuf);
+    }
+    free(dbuf);
+
+    ok = ok && fr_ok;
     net_cleanup();
 
     // tidy up the fixture tree

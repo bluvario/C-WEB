@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 700 // realpath, snprintf("%s") in strict c11 mode
+
 // cweb: the C-WEB command-line driver. turns a directory of .c.html pages
 // into a native server binary:
 //
@@ -114,6 +116,101 @@ static int path_join(char *dst, size_t dsize, const char *a, const char *b)
     dst[an] = '/';
     memcpy(dst + an + 1, b, bn + 1);
     return 0;
+}
+
+static int is_dir(const char *p)
+{
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// absolute directory holding argv[0], or "" when it was found via PATH (no
+// slash in argv[0], so we cannot know where it lives)
+static void absolute_tool_dir(const char *argv0, char *out, size_t out_size)
+{
+    out[0] = '\0';
+    if (strchr(argv0, '/') == NULL) {
+        return;
+    }
+    char abs[4096];
+    if (realpath(argv0, abs) == NULL) {
+        return;
+    }
+    char *slash = strrchr(abs, '/');
+    if (slash == NULL || slash == abs) {
+        return;
+    }
+    *slash = '\0';
+    snprintf(out, out_size, "%s", abs);
+}
+
+// locates the cweb framework checkout for a build. tried in order:
+//   1. the given root itself when it holds include/
+//   2. the tool binary's own checkout (the binary normally lives at
+//      <checkout>/build/cweb), which is what makes "cweb serve views 8080
+//      . static" work from inside an app directory next to the checkout
+//   3. the nearest ancestor of the given root that holds include/
+// returns 1 with the absolute path in out, 0 when none exists (out
+// untouched).
+static int framework_root(const char *given, const char *argv0,
+                          char *out, size_t out_size)
+{
+    char cur[4096];
+    if (realpath(given, cur) == NULL) {
+        // fall back to the literal string so the error message says what
+        // the user typed even when the path does not exist
+        snprintf(cur, sizeof cur, "%s", given);
+    }
+
+    char inc[4096];
+    if (path_join(inc, sizeof inc, cur, "include") == 0 && is_dir(inc)) {
+        snprintf(out, out_size, "%s", cur);
+        return 1;
+    }
+
+    // the binary lives at <checkout>/build/cweb, so its parent holds include/
+    char tdir[4096];
+    absolute_tool_dir(argv0, tdir, sizeof tdir);
+    if (tdir[0] != '\0') {
+        char *slot = strrchr(tdir, '/');
+        if (slot != NULL && slot != tdir) {
+            *slot = '\0';
+            if (path_join(inc, sizeof inc, tdir, "include") == 0 &&
+                is_dir(inc)) {
+                snprintf(out, out_size, "%s", tdir);
+                return 1;
+            }
+        }
+    }
+
+    // walk the given root's ancestors, so a checkout one breadcrumb up from
+    // the app dir is still found without an explicit ROOT
+    for (;;) {
+        char *split = strrchr(cur, '/');
+        if (split == NULL || split == cur) {
+            return 0;
+        }
+        *split = '\0';
+        if (path_join(inc, sizeof inc, cur, "include") == 0 && is_dir(inc)) {
+            snprintf(out, out_size, "%s", cur);
+            return 1;
+        }
+    }
+}
+
+// appends s to sb as a shell single-quoted word, so a directory name cannot
+// smuggle metacharacters into the system() invocation that links the server
+static void strbuf_append_shell_quoted(Strbuf *sb, const char *s)
+{
+    strbuf_append_char(sb, '\'');
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p == '\'') {
+            strbuf_append_cstr(sb, "'\\''");
+        } else {
+            strbuf_append_char(sb, *p);
+        }
+    }
+    strbuf_append_char(sb, '\'');
 }
 
 // walks base + "/" + rel collecting every *.c.html as a path relative to base
@@ -677,7 +774,19 @@ static int cmd_build(int argc, char **argv)
     }
     const char *views_arg = argv[2];
     const char *out_arg = argv[3];
-    const char *root = argc >= 5 ? argv[4] : ".";
+    const char *root_arg = argc >= 5 ? argv[4] : ".";
+    // ROOT is only used to lay hands on ../include and ../build/libcweb.a, so
+    // a relative "." from inside an app directory still finds the framework
+    // checkout one level (or more) up
+    char root[4096];
+    if (!framework_root(root_arg, argv[0], root, sizeof root)) {
+        char msg[512];
+        snprintf(msg, sizeof msg,
+                 "cannot find the cweb framework: no include/ under %s, next to "
+                 "the tool binary, or in any ancestor",
+                 root_arg);
+        return die(msg);
+    }
     const char *static_arg = argc >= 6 ? argv[5] : "";
     if (static_arg[0] != '\0') {
         struct stat st;
@@ -804,20 +913,20 @@ static int cmd_build(int argc, char **argv)
     Strbuf cc;
     strbuf_init(&cc);
     strbuf_append_cstr(&cc, "cc -std=c11 -Wall -Wextra -I");
-    strbuf_append_cstr(&cc, root);
+    strbuf_append_shell_quoted(&cc, root);
     strbuf_append_cstr(&cc, "/include -I");
-    strbuf_append_cstr(&cc, out_arg);
+    strbuf_append_shell_quoted(&cc, out_arg);
     strbuf_append_cstr(&cc, " ");
-    strbuf_append_cstr(&cc, main_path);
+    strbuf_append_shell_quoted(&cc, main_path);
     for (size_t i = 0; i < views.count; i++) {
         snprintf(gen, sizeof gen, "%s/%s.c", out_arg, names[i]);
         strbuf_append_char(&cc, ' ');
-        strbuf_append_cstr(&cc, gen);
+        strbuf_append_shell_quoted(&cc, gen);
     }
     strbuf_append_cstr(&cc, " ");
-    strbuf_append_cstr(&cc, root);
+    strbuf_append_shell_quoted(&cc, root);
     strbuf_append_cstr(&cc, "/build/libcweb.a -lz -o ");
-    strbuf_append_cstr(&cc, bin_path);
+    strbuf_append_shell_quoted(&cc, bin_path);
     strbuf_null_terminate(&cc);
     int rc = system(cc.items);
     strbuf_free(&cc);
@@ -1182,9 +1291,12 @@ static void usage(FILE *f)
         "  new APP_DIR                     scaffold a runnable app skeleton\n"
         "  version                         print the framework version\n"
         "\n"
-        "ROOT (default \".\") is the project root holding include/ and\n"
-        "build/libcweb.a, so run the tool from there. STATIC, when given, is a\n"
-        "directory mounted at /* and served for any path a page does not claim.\n"
+"ROOT (default \".\") is the cweb checkout holding include/ and\n"
+         "build/libcweb.a; when the path given doesn't hold an include/ dir,\n"
+         "the tool walks up to the nearest ancestor that does, so you can run\n"
+         "\"cweb serve views 8080 . static\" from inside an app directory and\n"
+         "the framework is still found. STATIC, when given, is a\n"
+         "directory mounted at /* and served for any path a page does not claim.\n"
         "A views/404.c.html page becomes the app's custom not-found page, served\n"
         "with a 404 status for any path nothing else answers.\n"
         "Files under VIEWS_DIR/partials/ become reusable fragments: they are\n"
