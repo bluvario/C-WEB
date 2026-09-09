@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,6 +150,66 @@ static char *fetch_req(int port, const char *method, const char *path,
     return buf;
 }
 
+// POST shipping a heap-sized body (fetch_req's stack buffer caps ~1.8 KiB);
+// returns the whole response
+static char *fetch_post_body(int port, const char *path, const char *body, size_t len)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    char head[256];
+    int hl = snprintf(head, sizeof head,
+                      "POST %s HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Content-Type: application/x-www-form-urlencoded\r\n"
+                      "Content-Length: %zu\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      path, len);
+    char *req = malloc((size_t)hl + len);
+    memcpy(req, head, (size_t)hl);
+    memcpy(req + hl, body, len);
+    long sent = net_send_all(s, req, (long)((size_t)hl + len));
+    free(req);
+    if (sent != (long)((size_t)hl + len)) {
+        net_close(s);
+        return NULL;
+    }
+    size_t cap = 8192, got = 0;
+    char *buf = malloc(cap);
+    long r;
+    while (got < cap - 1 && (r = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
+// sends a partial request (no final blank line), then waits 400 ms past the
+// server's --io-timeout to see whether it answers 408; returns the response
+static char *fetch_stall(int port, const char *partial)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    net_send_all(s, partial, strlen(partial));
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 400000000};
+    nanosleep(&ts, NULL);
+    net_set_timeout(s, 2000);
+    size_t cap = 8192, got = 0;
+    char *buf = malloc(cap);
+    long r;
+    while (got < cap - 1 && (r = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
 // pulls "<name>=<value>" out of a response's Set-Cookie header
 static void grab_cookie(const char *resp, const char *name, char *out, size_t out_size)
 {
@@ -280,6 +341,12 @@ int main(void)
                     strstr(main, "--log") != NULL &&
                     strstr(main, "--static-cache") != NULL &&
                     strstr(main, "http_static_set_cache(cweb_static_cache)") != NULL &&
+                    strstr(main, "--max-body") != NULL &&
+                    strstr(main, "--io-timeout") != NULL &&
+                    strstr(main, "--workers") != NULL &&
+                    strstr(main, "cweb_size_arg") != NULL &&
+                    strstr(main, "http_serve_config(listener, router_dispatch, &r, &cfg)") != NULL &&
+                    strstr(main, "cfg.max_body = cweb_max_body;") != NULL &&
                     strstr(main, "log_set_clf(clf_file)") != NULL &&
                     strstr(main, "--db") != NULL &&
                     strstr(main, "cweb_db_open(&cweb_database_impl, db_path)") != NULL &&
@@ -1115,6 +1182,154 @@ int main(void)
     kill(vv_child, SIGTERM);
     waitpid(vv_child, NULL, 0);
     ok = ok && vv_ok;
+
+    // --- hardening: --max-body caps request size (413), --io-timeout trips a
+    // 408 on stalled clients, --workers sizes the pool, --routes shows all ---
+    char hv[1024], ho[1024];
+    snprintf(hv, sizeof hv, "%s/hv", tmp);
+    mkdir(hv, 0755);
+    snprintf(ho, sizeof ho, "%s/ho", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", hv);
+    wfile(wbuf, "<?c ?><p>hardening fixture</p>");
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s >/dev/null", TOOL, hv, ho);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the hardening fixture\n");
+        return 1;
+    }
+    snprintf(wbuf, sizeof wbuf, "%s/server", ho);
+    int h_ok = 1;
+    char routes_file[600];
+
+    // --routes echoes the hardening knobs, and only when they are set
+    snprintf(routes_file, sizeof routes_file, "%s/routes.txt", tmp);
+    pid_t rp = fork();
+    if (rp == 0) {
+        int fd = open(routes_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        execl(wbuf, "server", "--max-body", "4k", "--io-timeout", "250",
+              "--workers", "3", "--routes", NULL);
+        _exit(127);
+    }
+    waitpid(rp, NULL, 0);
+    FILE *rf = fopen(routes_file, "r");
+    char *rc = malloc(4096);
+    size_t rn = fread(rc, 1, 4095, rf);
+    rc[rn] = '\0';
+    fclose(rf);
+    h_ok = h_ok && strstr(rc, "max-body: 4096 bytes") != NULL &&
+           strstr(rc, "io-timeout: 250ms") != NULL &&
+           strstr(rc, "workers: 3") != NULL;
+    if (!h_ok) {
+        fprintf(stderr, "--routes should echo the hardening knobs when set:\n%s\n", rc);
+    }
+    free(rc);
+
+    snprintf(routes_file, sizeof routes_file, "%s/routes2.txt", tmp);
+    rp = fork();
+    if (rp == 0) {
+        int fd = open(routes_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        execl(wbuf, "server", "--routes", NULL);
+        _exit(127);
+    }
+    waitpid(rp, NULL, 0);
+    rf = fopen(routes_file, "r");
+    rc = malloc(4096);
+    rn = fread(rc, 1, 4095, rf);
+    rc[rn] = '\0';
+    fclose(rf);
+    h_ok = h_ok && strstr(rc, "max-body:") == NULL &&
+           strstr(rc, "io-timeout:") == NULL &&
+           strstr(rc, "workers:") == NULL;
+    if (!h_ok) {
+        fprintf(stderr, "--routes without knobs should not mention them:\n%s\n", rc);
+    }
+    free(rc);
+
+    // a body under the cap is served, a body over it gets 413
+    probe = net_listen(0);
+    int hb_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", hb_port);
+    pid_t hb_child = fork();
+    if (hb_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--max-body", "4096", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(hb_port) != 0) {
+        fprintf(stderr, "hardening server did not come up on port %d\n", hb_port);
+        return 1;
+    }
+    char big[70000];
+    memset(big, 'x', sizeof big);
+    char *hb_body = fetch_post_body(hb_port, "/", big, 2000);
+    h_ok = h_ok && hb_body != NULL && strstr(hb_body, "HTTP/1.1 200 OK") != NULL;
+    if (!h_ok) {
+        fprintf(stderr, "a body under --max-body should be served:\n%.120s\n",
+                hb_body ? hb_body : "(connect error)");
+    }
+    free(hb_body);
+
+    hb_body = fetch_post_body(hb_port, "/", big, 9000);
+    h_ok = h_ok && hb_body != NULL && strstr(hb_body, "HTTP/1.1 413") != NULL;
+    if (!h_ok) {
+        fprintf(stderr, "a body over --max-body should be refused with 413:\n%.120s\n",
+                hb_body ? hb_body : "(connect error)");
+    }
+    free(hb_body);
+    kill(hb_child, SIGTERM);
+    waitpid(hb_child, NULL, 0);
+
+    // the library default cap (64 KiB) still applies without a flag
+    probe = net_listen(0);
+    int hd_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", hd_port);
+    pid_t hd_child = fork();
+    if (hd_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(hd_port) != 0) {
+        fprintf(stderr, "default server did not come up on port %d\n", hd_port);
+        return 1;
+    }
+    hb_body = fetch_post_body(hd_port, "/", big, 70000);
+    h_ok = h_ok && hb_body != NULL && strstr(hb_body, "HTTP/1.1 413") != NULL;
+    if (!h_ok) {
+        fprintf(stderr, "the default 64 KiB cap should 413 a 70 KiB body:\n%.120s\n",
+                hb_body ? hb_body : "(connect error)");
+    }
+    free(hb_body);
+    kill(hd_child, SIGTERM);
+    waitpid(hd_child, NULL, 0);
+
+    // a client that stalls past --io-timeout gets a 408
+    probe = net_listen(0);
+    int ht_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", ht_port);
+    pid_t ht_child = fork();
+    if (ht_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--io-timeout", "150", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(ht_port) != 0) {
+        fprintf(stderr, "timeout server did not come up on port %d\n", ht_port);
+        return 1;
+    }
+    char *ht_body = fetch_stall(ht_port, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    h_ok = h_ok && ht_body != NULL && strstr(ht_body, "HTTP/1.1 408") != NULL;
+    if (!h_ok) {
+        fprintf(stderr, "a client stalling past --io-timeout should get 408:\n%.120s\n",
+                ht_body ? ht_body : "(connect error)");
+    }
+    free(ht_body);
+    kill(ht_child, SIGTERM);
+    waitpid(ht_child, NULL, 0);
+    ok = ok && h_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];

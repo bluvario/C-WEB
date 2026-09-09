@@ -273,6 +273,29 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// Cache-Control max-age for the static root, from --static-cache\n"
         "static unsigned long cweb_static_cache = 0;\n"
         "\n"
+        "// hardening knobs for http_serve_config(), from --max-body,\n"
+        "// --io-timeout and --workers; zero keeps the library defaults\n"
+        "static size_t cweb_max_body = 0;\n"
+        "static unsigned long cweb_io_timeout_ms = 0;\n"
+        "static size_t cweb_workers = 0;\n"
+        "\n"
+        "// parses \"8192\", \"8k\", \"8K\", \"2m\", \"1g\" into bytes for\n"
+        "// --max-body; 0 on an empty or non-numeric argument\n"
+        "static size_t cweb_size_arg(const char *s)\n"
+        "{\n"
+        "    char *end = NULL;\n"
+        "    size_t v = strtoul(s, &end, 10);\n"
+        "    if (end == s) {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    switch (*end) {\n"
+        "    case 'k': case 'K': return v * 1024;\n"
+        "    case 'm': case 'M': return v * 1024 * 1024;\n"
+        "    case 'g': case 'G': return v * 1024 * 1024 * 1024;\n"
+        "    default: return v;\n"
+        "    }\n"
+        "}\n"
+        "\n"
         "// per-client bucket key when --rate is on: the caller's IP as text.\n"
         "// an empty remote (before the server fills it in) would route every\n"
         "// unidentified connection into one shared bucket, so this is only\n"
@@ -321,6 +344,15 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
           f);
     fputs("    if (cweb_static_cache > 0) "
           "printf(\"static-cache: %lus\\n\", cweb_static_cache);\n",
+          f);
+    fputs("    if (cweb_max_body > 0) "
+          "printf(\"max-body: %zu bytes\\n\", cweb_max_body);\n",
+          f);
+    fputs("    if (cweb_io_timeout_ms > 0) "
+          "printf(\"io-timeout: %lums\\n\", cweb_io_timeout_ms);\n",
+          f);
+    fputs("    if (cweb_workers > 0) "
+          "printf(\"workers: %zu\\n\", cweb_workers);\n",
           f);
     if (has_404) {
         fputs("    printf(\"404: * (fallback)\\n\");\n", f);
@@ -421,6 +453,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            log_path = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--static-cache\") == 0 && i + 1 < argc) {\n"
         "            cweb_static_cache = strtoul(argv[++i], NULL, 10);\n"
+        "        } else if (strcmp(argv[i], \"--max-body\") == 0 && i + 1 < argc) {\n"
+        "            cweb_max_body = cweb_size_arg(argv[++i]);\n"
+        "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
+        "            cweb_io_timeout_ms = strtoul(argv[++i], NULL, 10);\n"
+        "        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
+        "            cweb_workers = strtoul(argv[++i], NULL, 10);\n"
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
@@ -528,6 +566,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        log_set_clf(clf_file);\n"
         "    }\n"
         "    int rc;\n"
+        "    Http_Server_Config cfg = {0};\n"
+        "    cfg.max_body = cweb_max_body;\n"
+        "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
+        "    cfg.workers = cweb_workers;\n"
         "    if (rate_per_min > 0 || secure || gzip) {\n"
         "        // hardening headers, (optionally) a per-client request\n"
         "        // budget, and gzip wrapping run around every response\n"
@@ -555,15 +597,15 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        }\n"
         "        void *chain_data = NULL;\n"
         "        Http_Handler_Fn dispatch =\n"
-        "            http_middleware_build(&chain, router_dispatch, &r, &chain_data);\n"
+"        http_middleware_build(&chain, router_dispatch, &r, &chain_data);\n"
         "        http_middleware_free(&chain);\n"
-        "        rc = http_serve(listener, dispatch, chain_data);\n"
+        "        rc = http_serve_config(listener, dispatch, chain_data, &cfg);\n"
         "        http_middleware_data_free(chain_data);\n"
         "        if (rate_per_min > 0) {\n"
         "            http_rate_limiter_free(&limiter);\n"
         "        }\n"
         "    } else {\n"
-        "        rc = http_serve(listener, router_dispatch, &r);\n"
+        "        rc = http_serve_config(listener, router_dispatch, &r, &cfg);\n"
         "    }\n"
         "    http_session_store_dump(&cweb_sessions);\n"
         "    http_session_store_free(&cweb_sessions);\n"
@@ -1136,7 +1178,11 @@ static void usage(FILE *f)
          "every response), --gzip (compress compressible bodies), --db PATH\n"
          "(a file-backed key-value store pages reach through cweb_database()),\n"
          "--static-cache SECONDS (Cache-Control max-age on static files, with\n"
-         "ETag and Last-Modified validators already answering 304) and\n"
+         "ETag and Last-Modified validators already answering 304),\n"
+         "--max-body BYTES (request size cap, 413 past it; accepts k/m/g\n"
+         "suffixes like 4k or 2m), --io-timeout MS (per-read deadline, stalled\n"
+         "clients get 408) and --workers N (accept-loop threads, default one\n"
+         "per core), and\n"
          "--log FILE (append Common Log Format access lines to FILE).\n");
 }
 

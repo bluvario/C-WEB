@@ -253,13 +253,20 @@ static String_View peer_ip(Socket_Handle client, char buf[INET6_ADDRSTRLEN])
 #endif
 }
 
-void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data)
+void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
+                                  void *user_data, const Http_Server_Config *cfg)
 {
+    // hardening knobs, zero meaning "library default"
+    size_t max_body = cfg != NULL && cfg->max_body > 0 ? cfg->max_body
+                                                       : REQUEST_BUFFER_CAP;
+    unsigned long timeout_ms = cfg != NULL && cfg->io_timeout_ms > 0
+                               ? cfg->io_timeout_ms : REQUEST_TIMEOUT_MS;
+
     Read_Buffer rb;
-    rb_init(&rb, REQUEST_BUFFER_CAP);
+    rb_init(&rb, max_body);
     // a dawdling client must not pin a worker forever; this is also the
     // slowloris backstop
-    net_set_timeout(client, REQUEST_TIMEOUT_MS);
+    net_set_timeout(client, timeout_ms);
 
     char peer_buf[INET6_ADDRSTRLEN];
     String_View remote = peer_ip(client, peer_buf);
@@ -275,7 +282,7 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
             pr = http_request_parse_adv(&req, rb_view(&rb), &consumed);
             if (pr == REQ_INCOMPLETE) {
                 if (rb.count >= rb.capacity) {
-                    log_warn("request exceeds %zu bytes, sending 413", REQUEST_BUFFER_CAP);
+                    log_warn("request exceeds %zu bytes, sending 413", max_body);
                     send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
                     rb_free(&rb);
                     return;
@@ -297,7 +304,7 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
                 if (dr > 0) {
                     http_request_free(&req);
                     if (rb.count >= rb.capacity) {
-                        log_warn("request exceeds %zu bytes, sending 413", REQUEST_BUFFER_CAP);
+                        log_warn("request exceeds %zu bytes, sending 413", max_body);
                         send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
                         rb_free(&rb);
                         return;
@@ -355,6 +362,11 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
     rb_free(&rb);
 }
 
+void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data)
+{
+    http_serve_connection_config(client, handler, user_data, NULL);
+}
+
 // one accept -> one job on the worker pool: a slow client must not stall
 // everyone else behind it, and the bounded pool caps how many clients can be
 // in flight at once. each job owns its socket and is freed by the worker.
@@ -362,19 +374,21 @@ typedef struct {
     Socket_Handle client;
     Http_Handler_Fn handler;
     void *user_data;
+    Http_Server_Config cfg; // copied per job so the worker applies it
 } Connection_Job;
 
 static void connection_worker(void *arg)
 {
     Connection_Job *job = arg;
     log_info("client connected");
-    http_serve_connection(job->client, job->handler, job->user_data);
+    http_serve_connection_config(job->client, job->handler, job->user_data, &job->cfg);
     net_close(job->client);
     log_info("client done");
     xfree(job);
 }
 
-int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
+int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler,
+                      void *user_data, const Http_Server_Config *cfg)
 {
 #ifdef _WIN32
     // TODO: a graceful-stop flag on Windows too, via a console ctrl handler
@@ -389,8 +403,9 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
     sigaction(SIGTERM, &sa, NULL);
 #endif
 
+    size_t workers = cfg != NULL ? cfg->workers : 0; // 0 = one per core
     Thread_Pool pool;
-    if (thread_pool_init(&pool, 0, connection_worker) != 0) {
+    if (thread_pool_init(&pool, workers, connection_worker) != 0) {
         log_error("could not start the worker pool");
         return -1;
     }
@@ -412,6 +427,7 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
         job->client = client;
         job->handler = handler;
         job->user_data = user_data;
+        job->cfg = cfg != NULL ? *cfg : (Http_Server_Config){0};
         if (thread_pool_submit(&pool, job) != 0) {
             // only happens after shutdown, so this accept loop is leaving
             log_error("worker pool shut down, dropping connection");
@@ -426,4 +442,9 @@ int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
     thread_pool_wait(&pool);
     thread_pool_free(&pool);
     return 0;
+}
+
+int http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data)
+{
+    return http_serve_config(listener, handler, user_data, NULL);
 }
