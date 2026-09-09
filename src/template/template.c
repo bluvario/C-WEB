@@ -13,34 +13,38 @@
 #include "sv.h"
 #include "xmem.h"
 
-// one capture buffer per worker thread: while a page renders into it, its
-// cweb_tpl_add writes are collected instead of going to the response, and the
-// wrapping layout reads them back. the buffer outlives each capture so the
-// layout can read the bytes after end() and the next begin() reuses storage.
-static _Thread_local int cap_active;
+// one capture buffer per worker thread. while a page renders into it, the
+// thread's response body IS that buffer: capture_begin swaps res->body with
+// the thread buffer and capture_end swaps it back, so every body write --
+// markup, helpers, flash, csrf fields -- is collected instead of going to
+// the response, and the wrapping layout reads the bytes back. the buffer
+// outlives each capture so the layout can read the bytes after end() and the
+// next begin() reuses its storage.
 static _Thread_local Strbuf cap_buf;
+static _Thread_local Strbuf page_buf; // the response's real body, parked here while capturing
 
 void cweb_tpl_add(Http_Response *res, const void *data, size_t len)
 {
-    if (cap_active) {
-        strbuf_append(&cap_buf, data, len);
-    } else {
-        http_response_add_body(res, (String_View){(const char *)data, len});
-    }
+    http_response_add_body(res, (String_View){(const char *)data, len});
 }
 
-void cweb_tpl_capture_begin(void)
+void cweb_tpl_capture_begin(Http_Response *res)
 {
-    cap_active = 1;
     if (cap_buf.items == NULL) {
         strbuf_init(&cap_buf);
     }
-    cap_buf.count = 0;
+    if (page_buf.items == NULL) {
+        strbuf_init(&page_buf);
+    }
+    page_buf = res->body;   // park the request's body buffer safely
+    res->body = cap_buf;    // the capture buffer is the active body now
+    res->body.count = 0;    // start a fresh capture
 }
 
-void cweb_tpl_capture_end(void)
+void cweb_tpl_capture_end(Http_Response *res)
 {
-    cap_active = 0;
+    cap_buf = res->body;    // harvest the captured bytes
+    res->body = page_buf;   // restore the response's real body
 }
 
 String_View cweb_tpl_layout_body(void)

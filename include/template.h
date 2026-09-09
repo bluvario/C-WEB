@@ -37,23 +37,26 @@ int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err);
 // ---------------------------------------------------------------------------
 // a views/layout.c.html wraps every routed page. the page handler renders
 // into a per-thread capture instead of the response, then the layout runs and
-// redraws the body with that markup in the middle. every cweb_tpl_out /
-// cweb_tpl_escape a generated page emits funnels through cweb_tpl_add, which
-// honors the active capture, so partials rendered from inside a page land in
-// the capture too.
+// redraws the body with that markup in the middle. the capture swaps the
+// response body with the thread buffer, so every body write -- generated
+// markup funneled through cweb_tpl_add and the http_response_add_body helpers
+// used by http_csrf_field / http_flash_render alike -- lands in the capture;
+// helper output is no longer lost when a layout rewraps the body.
 
-// appends to the response body, or to the capturing thread's buffer while a
-// capture is active. emitted code's only primitive, so both normal and
-// escaping output flows are captured transparently.
+// appends to the response body. emitted code's only primitive, so both
+// normal and escaping output flows write through the same place. while a
+// capture is active res->body IS the capture buffer, so nothing special is
+// needed here.
 void cweb_tpl_add(Http_Response *res, const void *data, size_t len);
 
-// opens a capture on this thread: subsequent cweb_tpl_add writes are held
+// opens a capture on this thread: res->body is swapped for the thread buffer
+// until cweb_tpl_capture_end, so all output during the page render is held
 // back from the response. reusable; the previous capture is discarded.
-void cweb_tpl_capture_begin(void);
+void cweb_tpl_capture_begin(Http_Response *res);
 
-// closes the capture; the held-back bytes are free for the layout to read and
-// the thread returns to writing straight into responses.
-void cweb_tpl_capture_end(void);
+// closes the capture: the response's real body is restored and the held-back
+// bytes are free for the layout to read.
+void cweb_tpl_capture_end(Http_Response *res);
 
 // the markup captured by the most recent cweb_tpl_capture_begin/end span on
 // this thread. valid until the next begin. layouts splice it in with

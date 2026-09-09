@@ -514,9 +514,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
                     name + 5);
             fputs("                          Str_Map *params, void *user_data)\n"
                   "{\n"
-                  "    cweb_tpl_capture_begin();\n", f);
+                  "    cweb_tpl_capture_begin(res);\n", f);
             fprintf(f, "    %s(req, res, params, user_data);\n", name);
-            fputs("    cweb_tpl_capture_end();\n"
+            fputs("    cweb_tpl_capture_end(res);\n"
                   // a response that never went through the capture (static
                   // files from the /* mount) is served as-is, not framed; a
                   // blank page is indistinguishable and stays unwrapped
@@ -532,9 +532,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
                 "static void cweb_wrap_fallback(Http_Request *req, Http_Response *res,\n"
                 "                               Str_Map *params, void *user_data)\n"
                 "{\n"
-                "    cweb_tpl_capture_begin();\n"
+                "    cweb_tpl_capture_begin(res);\n"
                 "    cweb_fallback(req, res, params, user_data);\n"
-                "    cweb_tpl_capture_end();\n"
+                "    cweb_tpl_capture_end(res);\n"
                 "    if (cweb_tpl_layout_body().count == 0) {\n"
                 "        return;\n"
                 "    }\n"
