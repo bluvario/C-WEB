@@ -168,6 +168,24 @@ static void grab_cookie(const char *resp, const char *name, char *out, size_t ou
     out[i] = '\0';
 }
 
+// pulls the value out of a rendered hidden input like
+// name="csrf_token" value="<token>"
+static void grab_form_token(const char *body, char *out, size_t out_size)
+{
+    const char *mark = strstr(body, "name=\"csrf_token\" value=\"");
+    if (mark == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    mark += strlen("name=\"csrf_token\" value=\"");
+    size_t i = 0;
+    while (mark[i] != '\0' && mark[i] != '"' && i + 1 < out_size) {
+        out[i] = mark[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
 int main(void)
 {
     if (net_init() != 0) {
@@ -903,6 +921,96 @@ int main(void)
     kill(fl_child, SIGTERM);
     waitpid(fl_child, NULL, 0);
     ok = ok && fl_ok;
+
+    // --- CSRF: the form carries a per-session token, POSTs must match it ---
+    char csv[1024], cso[1024];
+    snprintf(csv, sizeof csv, "%s/csv", tmp);
+    mkdir(csv, 0755);
+    snprintf(cso, sizeof cso, "%s/cso", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", csv);
+    wfile(wbuf,
+          "<?c\n"
+          "  Http_Session_Store *cs = (Http_Session_Store *)user_data;\n"
+          "  Http_Session *sesh = http_session_from_cookie(cs, req, \"cweb_session\");\n"
+          "  if (sesh == NULL) {\n"
+          "      char *tok = http_session_create(cs, -1);\n"
+          "      if (tok != NULL) {\n"
+          "          sesh = http_session_open(cs, tok);\n"
+          "          http_session_issue_cookie(res, \"cweb_session\", tok, NULL);\n"
+          "      }\n"
+          "  }\n"
+          "  if (req->method == HTTP_POST) {\n"
+          "      if (http_csrf_verify(params, sesh) != 0) {\n"
+          "          http_csrf_reject(res, \"/\");\n"
+          "          return;\n"
+          "      }\n"
+          "      http_response_redirect(res, HTTP_303_SEE_OTHER, \"/?done=1\");\n"
+          "      return;\n"
+          "  }\n"
+          "?>\n"
+          "<form method=\"post\" action=\"/\">\n"
+          "  <?c http_csrf_field(res, sesh); ?>\n"
+          "  <button>Go</button>\n"
+          "</form>");
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s >/dev/null", TOOL, csv, cso);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the csrf fixture\n");
+        return 1;
+    }
+    probe = net_listen(0);
+    int cs_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", cs_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", cso);
+    pid_t cs_child = fork();
+    if (cs_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(cs_port) != 0) {
+        fprintf(stderr, "csrf server did not come up on port %d\n", cs_port);
+        return 1;
+    }
+    char *cs_body = fetch_req(cs_port, "GET", "/", NULL, NULL);
+    char cs_cookie[160], cs_tok[64];
+    grab_cookie(cs_body, "cweb_session", cs_cookie, sizeof cs_cookie);
+    grab_form_token(cs_body, cs_tok, sizeof cs_tok);
+    int cs_ok = cs_body != NULL && strstr(cs_body, "HTTP/1.1 200 OK") != NULL &&
+                strstr(cs_body, "name=\"csrf_token\" value=\"") != NULL &&
+                cs_cookie[0] != '\0' && strlen(cs_tok) == 40;
+    if (!cs_ok) {
+        fprintf(stderr, "the form should carry a per-session csrf token:\n%.160s\n", cs_body ? cs_body : "(connect error)");
+    }
+    free(cs_body);
+
+    char cs_hdr[192];
+    snprintf(cs_hdr, sizeof cs_hdr, "cweb_session=%s", cs_cookie);
+    cs_body = fetch_req(cs_port, "POST", "/", cs_hdr, "");
+    cs_ok = cs_ok && cs_body != NULL && strstr(cs_body, "HTTP/1.1 403") != NULL;
+    if (!cs_ok) {
+        fprintf(stderr, "a POST without the token must be refused:\n%.140s\n", cs_body ? cs_body : "(connect error)");
+    }
+    free(cs_body);
+
+    cs_body = fetch_req(cs_port, "POST", "/", cs_hdr, "csrf_token=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    cs_ok = cs_ok && cs_body != NULL && strstr(cs_body, "HTTP/1.1 403") != NULL;
+    if (!cs_ok) {
+        fprintf(stderr, "a POST with the wrong token must be refused:\n%.140s\n", cs_body ? cs_body : "(connect error)");
+    }
+    free(cs_body);
+
+    char cs_form[96];
+    snprintf(cs_form, sizeof cs_form, "csrf_token=%s", cs_tok);
+    cs_body = fetch_req(cs_port, "POST", "/", cs_hdr, cs_form);
+    cs_ok = cs_ok && cs_body != NULL && strstr(cs_body, "HTTP/1.1 303") != NULL &&
+            strstr(cs_body, "Location: /?done=1") != NULL;
+    if (!cs_ok) {
+        fprintf(stderr, "a POST carrying the real token must be accepted:\n%.140s\n", cs_body ? cs_body : "(connect error)");
+    }
+    free(cs_body);
+    kill(cs_child, SIGTERM);
+    waitpid(cs_child, NULL, 0);
+    ok = ok && cs_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];
