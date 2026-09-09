@@ -255,6 +255,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"template.h\"\n"
         "#include \"db.h\"\n"
         "#include \"gzip.h\"\n"
+        "#include \"request_sign.h\"\n"
         "#include \"log.h\"\n"
         "\n"
         "// one server-side session store for the whole process, handed to every\n"
@@ -278,6 +279,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "static size_t cweb_max_body = 0;\n"
         "static unsigned long cweb_io_timeout_ms = 0;\n"
         "static size_t cweb_workers = 0;\n"
+        "\n"
+        "// shared secret for HMAC-signed requests, from --signature-secret;\n"
+        "// NULL keeps request signing off entirely\n"
+        "static const char *cweb_signature_secret = NULL;\n"
         "\n"
         "// parses \"8192\", \"8k\", \"8K\", \"2m\", \"1g\" into bytes for\n"
         "// --max-body; 0 on an empty or non-numeric argument\n"
@@ -353,6 +358,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
           f);
     fputs("    if (cweb_workers > 0) "
           "printf(\"workers: %zu\\n\", cweb_workers);\n",
+          f);
+    fputs("    if (cweb_signature_secret != NULL) "
+          "printf(\"signature: on\\n\");\n",
           f);
     if (has_404) {
         fputs("    printf(\"404: * (fallback)\\n\");\n", f);
@@ -457,8 +465,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            cweb_max_body = cweb_size_arg(argv[++i]);\n"
         "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
         "            cweb_io_timeout_ms = strtoul(argv[++i], NULL, 10);\n"
-        "        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
-        "            cweb_workers = strtoul(argv[++i], NULL, 10);\n"
+"        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
+            "            cweb_workers = strtoul(argv[++i], NULL, 10);\n"
+            "        } else if (strcmp(argv[i], \"--signature-secret\") == 0 && i + 1 < argc) {\n"
+            "            cweb_signature_secret = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
@@ -570,9 +580,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    cfg.max_body = cweb_max_body;\n"
         "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
         "    cfg.workers = cweb_workers;\n"
-        "    if (rate_per_min > 0 || secure || gzip) {\n"
+        "    if (rate_per_min > 0 || secure || gzip || cweb_signature_secret != NULL) {\n"
         "        // hardening headers, (optionally) a per-client request\n"
-        "        // budget, and gzip wrapping run around every response\n"
+        "        // budget, gzip wrapping, and a shared-secret signature\n"
+        "        // check run around every response\n"
         "        Http_RateLimiter limiter;\n"
         "        if (rate_per_min > 0) {\n"
         "            // N requests a minute per client: the bucket starts full\n"
@@ -582,10 +593,20 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "                                   (double)rate_per_min);\n"
         "            limiter.key_fn = cweb_rate_key;\n"
         "        }\n"
+        "        Http_Signature_Options sig_opts = {0};\n"
+        "        if (cweb_signature_secret != NULL) {\n"
+        "            // --signature-secret makes every request prove it came\n"
+        "            // from a proxy holding the same secret, 403 otherwise\n"
+        "            sig_opts.secret = cweb_signature_secret;\n"
+        "        }\n"
         "        Http_Middleware_Chain chain;\n"
         "        http_middleware_init(&chain);\n"
         "        if (secure) {\n"
         "            http_middleware_add(&chain, http_security_middleware, NULL);\n"
+        "        }\n"
+        "        if (cweb_signature_secret != NULL) {\n"
+        "            http_middleware_add(&chain, http_signature_middleware,\n"
+        "                                &sig_opts);\n"
         "        }\n"
         "        if (gzip) {\n"
         "            // --gzip compresses compressible bodies on the way out\n"
@@ -1182,8 +1203,11 @@ static void usage(FILE *f)
          "--max-body BYTES (request size cap, 413 past it; accepts k/m/g\n"
          "suffixes like 4k or 2m), --io-timeout MS (per-read deadline, stalled\n"
          "clients get 408) and --workers N (accept-loop threads, default one\n"
-         "per core), and\n"
-         "--log FILE (append Common Log Format access lines to FILE).\n");
+"per core), and\n"
+          "--signature-secret SECRET (fall back on a reverse proxy that stamps\n"
+          "every request with HMAC-SHA256 of \"METHOD\\nPATH\\nUNIX-SECONDS\\nBODY\"\n"
+          "in X-CWEB-Signature/X-CWEB-Date; anything else is answered 403), and\n"
+          "--log FILE (append Common Log Format access lines to FILE).\n");
 }
 
 int main(int argc, char **argv)

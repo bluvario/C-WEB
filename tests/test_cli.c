@@ -12,6 +12,7 @@
 
 #include "db.h"
 #include "net.h"
+#include "request_sign.h"
 #include "sv.h"
 
 #define TOOL "./build/cweb"
@@ -150,7 +151,45 @@ static char *fetch_req(int port, const char *method, const char *path,
     return buf;
 }
 
-// POST shipping a heap-sized body (fetch_req's stack buffer caps ~1.8 KiB);
+// GET stamped with a fresh X-CWEB-Date / X-CWEB-Signature pair over the
+// canonical facts a --signature-secret server checks; taint != 0 flips one
+// hex character of the signature so the request must be refused
+static char *fetch_signed(int port, const char *path, const char *secret, int taint)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    long long now = (long long)time(NULL);
+    char hex[65];
+    http_request_signature_compute("GET", path, strlen(path), NULL, 0, now,
+                                   secret, hex, sizeof(hex));
+    if (taint) {
+        hex[10] = hex[10] == 'a' ? 'b' : 'a';
+    }
+    char req[1024];
+    int rl = snprintf(req, sizeof req,
+                      "GET %s HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "X-CWEB-Date: %lld\r\n"
+                      "X-CWEB-Signature: %s\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      path, now, hex);
+    if (net_send_all(s, req, rl) != rl) {
+        net_close(s);
+        return NULL;
+    }
+    size_t cap = 8192, got = 0;
+    char *buf = malloc(cap);
+    long r;
+    while (got < cap - 1 && (r = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
 // returns the whole response
 static char *fetch_post_body(int port, const char *path, const char *body, size_t len)
 {
@@ -328,6 +367,7 @@ int main(void)
                     strstr(main, "#include \"template.h\"") != NULL &&
                     strstr(main, "#include \"db.h\"") != NULL &&
                     strstr(main, "#include \"gzip.h\"") != NULL &&
+                    strstr(main, "#include \"request_sign.h\"") != NULL &&
                     strstr(main, "#include \"log.h\"") != NULL &&
                     strstr(main, "cweb_tpl_capture_begin") != NULL &&
                     strstr(main, "static void cweb_wrap_hello(") != NULL &&
@@ -335,6 +375,7 @@ int main(void)
                     strstr(main, "http_rate_limit_middleware") != NULL &&
                     strstr(main, "http_security_middleware") != NULL &&
                     strstr(main, "http_gzip_middleware") != NULL &&
+                    strstr(main, "http_signature_middleware") != NULL &&
                     strstr(main, "cweb_rate_key") != NULL &&
                     strstr(main, "--secure") != NULL &&
                     strstr(main, "--gzip") != NULL &&
@@ -344,6 +385,8 @@ int main(void)
                     strstr(main, "--max-body") != NULL &&
                     strstr(main, "--io-timeout") != NULL &&
                     strstr(main, "--workers") != NULL &&
+                    strstr(main, "--signature-secret") != NULL &&
+                    strstr(main, "Http_Signature_Options sig_opts = {0};") != NULL &&
                     strstr(main, "cweb_size_arg") != NULL &&
                     strstr(main, "http_serve_config(listener, router_dispatch, &r, &cfg)") != NULL &&
                     strstr(main, "cfg.max_body = cweb_max_body;") != NULL &&
@@ -1330,6 +1373,73 @@ int main(void)
     kill(ht_child, SIGTERM);
     waitpid(ht_child, NULL, 0);
     ok = ok && h_ok;
+
+    // --- --signature-secret: only requests stamped with the shared secret ---
+    // --- reach a page; everything else is refused with a 403 ---------------
+    int sg_ok = 1;
+
+    // --routes should surface the gate only when a secret is configured
+    snprintf(routes_file, sizeof routes_file, "%s/sroutes.txt", tmp);
+    pid_t srp = fork();
+    if (srp == 0) {
+        int fd = open(routes_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        execl(wbuf, "server", "--signature-secret", "s3cr3t", "--routes", NULL);
+        _exit(127);
+    }
+    waitpid(srp, NULL, 0);
+    rf = fopen(routes_file, "r");
+    rc = malloc(4096);
+    rn = fread(rc, 1, 4095, rf);
+    rc[rn] = '\0';
+    fclose(rf);
+    sg_ok = sg_ok && strstr(rc, "signature: on") != NULL;
+    if (!sg_ok) {
+        fprintf(stderr, "--routes should echo signature when --signature-secret is set:\n%s\n", rc);
+    }
+    free(rc);
+
+    probe = net_listen(0);
+    int sg_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", sg_port);
+    pid_t sg_child = fork();
+    if (sg_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--signature-secret",
+              "s3cr3t", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(sg_port) != 0) {
+        fprintf(stderr, "signature server did not come up on port %d\n", sg_port);
+        return 1;
+    }
+    char *sg_body = fetch_signed(sg_port, "/", "s3cr3t", 0);
+    sg_ok = sg_ok && sg_body != NULL && strstr(sg_body, "HTTP/1.1 200 OK") != NULL;
+    if (!sg_ok) {
+        fprintf(stderr, "a request with a valid signature should be served:\n%.120s\n",
+                sg_body ? sg_body : "(connect error)");
+    }
+    free(sg_body);
+
+    sg_body = fetch_signed(sg_port, "/", "s3cr3t", 1);
+    sg_ok = sg_ok && sg_body != NULL && strstr(sg_body, "HTTP/1.1 403") != NULL;
+    if (!sg_ok) {
+        fprintf(stderr, "a request with a tampered signature should be refused:\n%.120s\n",
+                sg_body ? sg_body : "(connect error)");
+    }
+    free(sg_body);
+
+    sg_body = fetch_signed(sg_port, "/", "wrong-secret", 0);
+    sg_ok = sg_ok && sg_body != NULL && strstr(sg_body, "HTTP/1.1 403") != NULL;
+    if (!sg_ok) {
+        fprintf(stderr, "a request signed with the wrong secret should be refused:\n%.120s\n",
+                sg_body ? sg_body : "(connect error)");
+    }
+    free(sg_body);
+    kill(sg_child, SIGTERM);
+    waitpid(sg_child, NULL, 0);
+    ok = ok && sg_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];
