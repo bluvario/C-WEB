@@ -113,3 +113,47 @@ int strmap_set(Str_Map *m, String_View key, String_View value)
     }
     return -1; // table is full, should not happen
 }
+
+void strmap_delete(Str_Map *m, String_View key)
+{
+    if (m->capacity == 0) {
+        return;
+    }
+    size_t mask = m->capacity - 1;
+    size_t idx = fnv1a(key.data, key.count) & mask;
+    while (m->entries[idx].key != NULL) {
+        if (strlen(m->entries[idx].key) == key.count &&
+            memcmp(m->entries[idx].key, key.data, key.count) == 0) {
+            break;
+        }
+        idx = (idx + 1) & mask;
+    }
+    if (m->entries[idx].key == NULL) {
+        return; // not present
+    }
+    xfree(m->entries[idx].key);
+    xfree(m->entries[idx].value);
+    m->entries[idx].key = NULL;
+    m->entries[idx].value = NULL;
+    m->count--;
+
+    // every entry that probed across the freed slot is now unreachable: pull
+    // the trailing cluster and re-insert it through strmap_set, which finds
+    // the correct slot now that the gap exists
+    Str_Map_Entry *held = xmalloc(m->capacity * sizeof(*held));
+    size_t nheld = 0;
+    size_t k = (idx + 1) & mask;
+    while (m->entries[k].key != NULL) {
+        held[nheld++] = m->entries[k];
+        m->count--;
+        m->entries[k].key = NULL;
+        m->entries[k].value = NULL;
+        k = (k + 1) & mask;
+    }
+    for (size_t i = 0; i < nheld; i++) {
+        (void)strmap_set(m, sv_from_cstr(held[i].key), sv_from_cstr(held[i].value));
+        xfree(held[i].key);
+        xfree(held[i].value);
+    }
+    xfree(held);
+}

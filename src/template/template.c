@@ -260,6 +260,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include <string.h>\n"
             "#include <time.h>\n\n"
             "#include \"escape.h\"\n"
+            "#include \"flash.h\"\n"
             "#include \"http.h\"\n"
             "#include \"request.h\"\n"
             "#include \"response.h\"\n"

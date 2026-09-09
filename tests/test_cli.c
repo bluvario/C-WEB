@@ -106,6 +106,68 @@ static char *fetch_hdr(int port, const char *path, const char *extra_header)
     return buf;
 }
 
+// full control variant: any method, an optional Cookie header and an
+// optional urlencoded body
+static char *fetch_req(int port, const char *method, const char *path,
+                       const char *cookie, const char *body)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    char req[2048];
+    int n = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\n"
+                     "Host: 127.0.0.1\r\n"
+                     "Connection: close\r\n",
+                     method, path);
+    if (cookie != NULL) {
+        n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", cookie);
+    }
+    if (body != NULL) {
+        n += snprintf(req + n, sizeof req - (size_t)n,
+                      "Content-Type: application/x-www-form-urlencoded\r\n"
+                      "Content-Length: %zu\r\n",
+                      strlen(body));
+    }
+    n += snprintf(req + n, sizeof req - (size_t)n, "\r\n");
+    if (body != NULL) {
+        memcpy(req + n, body, strlen(body));
+        n += (int)strlen(body);
+    }
+    if (net_send_all(s, req, (long)n) != n) {
+        net_close(s);
+        return NULL;
+    }
+    size_t cap = 8192, got = 0;
+    char *buf = malloc(cap);
+    long r;
+    while (got < cap - 1 && (r = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
+// pulls "<name>=<value>" out of a response's Set-Cookie header
+static void grab_cookie(const char *resp, const char *name, char *out, size_t out_size)
+{
+    char mark[96];
+    snprintf(mark, sizeof mark, "Set-Cookie: %s=", name);
+    const char *at = strstr(resp, mark);
+    if (at == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    at += strlen(mark);
+    size_t i = 0;
+    while (at[i] != '\0' && at[i] != ';' && at[i] != '\r' && i + 1 < out_size) {
+        out[i] = at[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
 int main(void)
 {
     if (net_init() != 0) {
@@ -754,6 +816,93 @@ int main(void)
     kill(sc_child, SIGTERM);
     waitpid(sc_child, NULL, 0);
     ok = ok && sc_ok;
+
+    // --- session flash messages: queued on POST, shown once on the next GET ---
+    char flv[1024], flo[1024];
+    snprintf(flv, sizeof flv, "%s/flv", tmp);
+    mkdir(flv, 0755);
+    snprintf(flo, sizeof flo, "%s/flo", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", flv);
+    wfile(wbuf,
+          "<?c\n"
+          "  Http_Session_Store *sfl = (Http_Session_Store *)user_data;\n"
+          "  Http_Session *sesh = http_session_from_cookie(sfl, req, \"cweb_session\");\n"
+          "  if (req->method == HTTP_POST) {\n"
+          "      if (sesh == NULL) {\n"
+          "          char *tok = http_session_create(sfl, -1);\n"
+          "          if (tok != NULL) {\n"
+          "              sesh = http_session_open(sfl, tok);\n"
+          "              http_session_issue_cookie(res, \"cweb_session\", tok, NULL);\n"
+          "          }\n"
+          "      }\n"
+          "      if (sesh != NULL) {\n"
+          "          http_flash_set(sesh, \"saved\", \"note pinned!\");\n"
+          "      }\n"
+          "      http_response_redirect(res, HTTP_303_SEE_OTHER, \"/\");\n"
+          "      return;\n"
+          "  }\n"
+          "  http_flash_render(res, sesh);\n"
+          "?>\n"
+          "<h1>Flash board</h1>");
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s >/dev/null", TOOL, flv, flo);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the flash fixture\n");
+        return 1;
+    }
+    probe = net_listen(0);
+    int fl_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", fl_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", flo);
+    pid_t fl_child = fork();
+    if (fl_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(fl_port) != 0) {
+        fprintf(stderr, "flash server did not come up on port %d\n", fl_port);
+        return 1;
+    }
+    char *fl_body = fetch_req(fl_port, "GET", "/", NULL, NULL);
+    int fl_ok = fl_body != NULL && strstr(fl_body, "HTTP/1.1 200 OK") != NULL &&
+                strstr(fl_body, "<h1>Flash board</h1>") != NULL &&
+                strstr(fl_body, "<div class=\"flash\">") == NULL;
+    if (!fl_ok) {
+        fprintf(stderr, "anonymous first visit should have no flash pending:\n%.120s\n", fl_body ? fl_body : "(connect error)");
+    }
+    free(fl_body);
+
+    fl_body = fetch_req(fl_port, "POST", "/", NULL, "");
+    char fl_cookie[160];
+    grab_cookie(fl_body, "cweb_session", fl_cookie, sizeof fl_cookie);
+    fl_ok = fl_ok && fl_body != NULL && strstr(fl_body, "HTTP/1.1 303") != NULL &&
+            strstr(fl_body, "Location: /") != NULL && fl_cookie[0] != '\0';
+    if (!fl_ok) {
+        fprintf(stderr, "flash POST should redirect home and open a session:\n%.140s\n", fl_body ? fl_body : "(connect error)");
+    }
+    free(fl_body);
+
+    char fl_hdr[192];
+    snprintf(fl_hdr, sizeof fl_hdr, "cweb_session=%s", fl_cookie);
+    fl_body = fetch_req(fl_port, "GET", "/", fl_hdr, NULL);
+    fl_ok = fl_ok && fl_body != NULL && strstr(fl_body, "HTTP/1.1 200 OK") != NULL &&
+            strstr(fl_body, "<h1>Flash board</h1>") != NULL &&
+            strstr(fl_body, "<div class=\"flash\">note pinned!</div>") != NULL;
+    if (!fl_ok) {
+        fprintf(stderr, "the queued flash should appear on the redirected GET:\n%.160s\n", fl_body ? fl_body : "(connect error)");
+    }
+    free(fl_body);
+
+    fl_body = fetch_req(fl_port, "GET", "/", fl_hdr, NULL);
+    fl_ok = fl_ok && fl_body != NULL && strstr(fl_body, "HTTP/1.1 200 OK") != NULL &&
+            strstr(fl_body, "<div class=\"flash\">") == NULL;
+    if (!fl_ok) {
+        fprintf(stderr, "a shown flash must be consumed by the render:\n%.160s\n", fl_body ? fl_body : "(connect error)");
+    }
+    free(fl_body);
+    kill(fl_child, SIGTERM);
+    waitpid(fl_child, NULL, 0);
+    ok = ok && fl_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];
