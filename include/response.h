@@ -1,6 +1,8 @@
 #ifndef CWEB_RESPONSE_H
 #define CWEB_RESPONSE_H
 
+#include <stdbool.h>
+
 #include "http.h"
 #include "strbuf.h"
 #include "sv.h"
@@ -30,6 +32,14 @@ void http_response_set_status(Http_Response *res, Http_Status status);
 // appends a header. calling it twice with the same name emits it twice,
 // replacing existing headers is not implemented yet.
 void http_response_set_header(Http_Response *res, const char *name, const char *value);
+
+// scans the response's header text for name (any case) and returns a heap
+// copy of its value, or NULL when the header is absent. caller xfrees it.
+// used by middleware that needs to read back a header the handler set, e.g.
+// Content-Type or Content-Encoding.
+char *http_response_get_header(Http_Response *res, const char *name);
+// true when the response carries a header with this name (any case)
+bool http_response_has_header(Http_Response *res, const char *name);
 
 void http_response_add_body(Http_Response *res, String_View data);
 void http_response_add_body_cstr(Http_Response *res, const char *text);

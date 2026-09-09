@@ -76,6 +76,36 @@ static char *fetch(int port, const char *path)
     return buf;
 }
 
+// same as fetch but with an extra request header line, e.g. Accept-Encoding
+static char *fetch_hdr(int port, const char *path, const char *extra_header)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    char req[1200];
+    snprintf(req, sizeof req,
+             "GET %s HTTP/1.1\r\n"
+             "Host: 127.0.0.1\r\n"
+             "%s"
+             "Connection: close\r\n"
+             "\r\n",
+             path, extra_header != NULL ? extra_header : "");
+    if (net_send_all(s, req, strlen(req)) != (long)strlen(req)) {
+        net_close(s);
+        return NULL;
+    }
+    size_t cap = 8192, n = 0;
+    char *buf = malloc(cap);
+    long got;
+    while (n < cap - 1 && (got = net_recv(s, buf + n, cap - n - 1)) > 0) {
+        n += (size_t)got;
+    }
+    buf[n] = '\0';
+    net_close(s);
+    return buf;
+}
+
 int main(void)
 {
     if (net_init() != 0) {
@@ -156,13 +186,16 @@ int main(void)
                     strstr(main, "#include \"security.h\"") != NULL &&
                     strstr(main, "#include \"template.h\"") != NULL &&
                     strstr(main, "#include \"db.h\"") != NULL &&
+                    strstr(main, "#include \"gzip.h\"") != NULL &&
                     strstr(main, "cweb_tpl_capture_begin") != NULL &&
                     strstr(main, "static void cweb_wrap_hello(") != NULL &&
                     strstr(main, "static void cweb_wrap_fallback(") != NULL &&
                     strstr(main, "http_rate_limit_middleware") != NULL &&
                     strstr(main, "http_security_middleware") != NULL &&
+                    strstr(main, "http_gzip_middleware") != NULL &&
                     strstr(main, "cweb_rate_key") != NULL &&
                     strstr(main, "--secure") != NULL &&
+                    strstr(main, "--gzip") != NULL &&
                     strstr(main, "--db") != NULL &&
                     strstr(main, "cweb_db_open(&cweb_database_impl, db_path)") != NULL &&
                     strstr(main, "cweb_db_close(&cweb_database_impl)") != NULL &&
@@ -634,6 +667,60 @@ int main(void)
                 s_ok, s_ok_secure, s_429, s_429_secure);
         return 1;
     }
+
+    // --- --gzip compresses compressible bodies for gzip clients ---
+    char gzv[1024], gzo[1024];
+    snprintf(gzv, sizeof gzv, "%s/gzv", tmp);
+    mkdir(gzv, 0755);
+    snprintf(gzo, sizeof gzo, "%s/gzo", tmp);
+    // static HTML comfortably above the 1 KiB gzip threshold
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", gzv);
+    FILE *gzf = fopen(wbuf, "w");
+    if (gzf != NULL) {
+        for (int i = 0; i < 80; i++) {
+            fputs("<p>lorem ipsum dolor sit amet, consectetur adipiscing elit</p>\n", gzf);
+        }
+        fclose(gzf);
+    }
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s >/dev/null", TOOL, gzv, gzo);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the gzip fixture\n");
+        return 1;
+    }
+    probe = net_listen(0);
+    int gz_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", gz_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", gzo);
+    pid_t gz_child = fork();
+    if (gz_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--gzip", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(gz_port) != 0) {
+        fprintf(stderr, "gzip server did not come up on port %d\n", gz_port);
+        return 1;
+    }
+    char *gz_raw = fetch(gz_port, "/");
+    int gz_plain_ok = gz_raw != NULL && strstr(gz_raw, "HTTP/1.1 200 OK") != NULL &&
+                      strstr(gz_raw, "Content-Encoding: gzip") == NULL;
+    size_t raw_len = gz_raw != NULL ? strlen(gz_raw) : 0;
+    char *gz_wire = fetch_hdr(gz_port, "/", "Accept-Encoding: gzip\r\n");
+    int gz_ok = gz_wire != NULL && strstr(gz_wire, "HTTP/1.1 200 OK") != NULL &&
+                strstr(gz_wire, "Content-Encoding: gzip") != NULL &&
+                raw_len > 0 && strlen(gz_wire) < raw_len;
+    if (!gz_plain_ok) {
+        fprintf(stderr, "plain request must stay ungzipped:\n%.80s\n", gz_raw ? gz_raw : "(connect error)");
+    }
+    if (!gz_ok) {
+        fprintf(stderr, "gzip request must compress (raw %zu, wire %zu):\n%.120s\n",
+                raw_len, gz_wire ? strlen(gz_wire) : 0, gz_wire ? gz_wire : "(connect error)");
+    }
+    free(gz_raw);
+    free(gz_wire);
+    kill(gz_child, SIGTERM);
+    waitpid(gz_child, NULL, 0);
+    ok = ok && gz_plain_ok && gz_ok;
 
     // --- cweb serve --watch rebuilds and restarts on change ---
     char wv[1024], ws[1024];

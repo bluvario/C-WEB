@@ -131,6 +131,7 @@ int main(void)
     http_response_add_body_cstr(&res, "form");
     http_response_redirect(&res, HTTP_303_SEE_OTHER, "/");
     if (strbuf_null_terminate(&res.headers) != 0) return 1;
+    if (strbuf_null_terminate(&res.body) != 0) return 1;
     const char *html_hdr = strstr(res.headers.items, "text/html");
     fails += check("redirect keeps existing content type", html_hdr != NULL);
     fails += check("redirect does not add a second content type",

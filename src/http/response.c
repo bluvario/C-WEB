@@ -8,6 +8,7 @@
 #include "date.h"
 #include "http.h"
 #include "strbuf.h"
+#include "xmem.h"
 
 void http_response_init(Http_Response *res)
 {
@@ -88,6 +89,62 @@ static bool response_has_header(Http_Response *res, const char *name)
         at = line_end < res->headers.count ? line_end + 1 : res->headers.count;
     }
     return false;
+}
+
+bool http_response_has_header(Http_Response *res, const char *name)
+{
+    return response_has_header(res, name);
+}
+
+// returns the value after "Name:" trimmed of leading/trailing whitespace, as
+// a heap copy; NULL when absent
+char *http_response_get_header(Http_Response *res, const char *name)
+{
+    size_t nn = strlen(name);
+    size_t at = 0;
+    while (at + nn < res->headers.count) {
+        size_t line_end = at;
+        while (line_end < res->headers.count &&
+               res->headers.items[line_end] != '\n') {
+            line_end++;
+        }
+        size_t line_len = line_end - at;
+        if (line_len >= nn &&
+            res->headers.items[at + nn] == ':') {
+            bool same = true;
+            for (size_t i = 0; i < nn; i++) {
+                if (tolower((unsigned char)res->headers.items[at + i]) !=
+                    tolower((unsigned char)name[i])) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                size_t value_start = at + nn + 1;
+                while (value_start < line_end &&
+                       (res->headers.items[value_start] == ' ' ||
+                        res->headers.items[value_start] == '\t')) {
+                    value_start++;
+                }
+                size_t value_end = line_end;
+                while (value_end > value_start &&
+                       (res->headers.items[value_end - 1] == ' ' ||
+                        res->headers.items[value_end - 1] == '\t' ||
+                        res->headers.items[value_end - 1] == '\r')) {
+                    value_end--;
+                }
+                char *out = xmalloc(value_end - value_start + 1);
+                if (value_end > value_start) {
+                    memcpy(out, res->headers.items + value_start,
+                           value_end - value_start);
+                }
+                out[value_end - value_start] = '\0';
+                return out;
+            }
+        }
+        at = line_end < res->headers.count ? line_end + 1 : res->headers.count;
+    }
+    return NULL;
 }
 
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location)

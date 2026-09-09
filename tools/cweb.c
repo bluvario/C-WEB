@@ -254,6 +254,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"strmap.h\"\n"
         "#include \"template.h\"\n"
         "#include \"db.h\"\n"
+        "#include \"gzip.h\"\n"
         "\n"
         "// one server-side session store for the whole process, handed to every\n"
         "// page as user_data; sessions live for an hour of inactivity\n"
@@ -395,6 +396,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    int port = 8080;\n"
         "    int rate_per_min = 0;\n"
         "    int secure = 0;\n"
+        "    int gzip = 0;\n"
         "    const char *db_path = NULL;\n"
         "    for (int i = 1; i < argc; i++) {\n"
         "        if (strcmp(argv[i], \"--port\") == 0 && i + 1 < argc) {\n"
@@ -403,6 +405,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            rate_per_min = atoi(argv[++i]);\n"
         "        } else if (strcmp(argv[i], \"--secure\") == 0) {\n"
         "            secure = 1;\n"
+        "        } else if (strcmp(argv[i], \"--gzip\") == 0) {\n"
+        "            gzip = 1;\n"
         "        } else if (strcmp(argv[i], \"--db\") == 0 && i + 1 < argc) {\n"
         "            db_path = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
@@ -496,9 +500,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        return 1;\n"
         "    }\n"
         "    int rc;\n"
-        "    if (rate_per_min > 0 || secure) {\n"
-        "        // hardening headers and (optionally) a per-client request\n"
-        "        // budget wrap dispatch so they are stamped on every response\n"
+        "    if (rate_per_min > 0 || secure || gzip) {\n"
+        "        // hardening headers, (optionally) a per-client request\n"
+        "        // budget, and gzip wrapping run around every response\n"
         "        Http_RateLimiter limiter;\n"
         "        if (rate_per_min > 0) {\n"
         "            // N requests a minute per client: the bucket starts full\n"
@@ -512,6 +516,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        http_middleware_init(&chain);\n"
         "        if (secure) {\n"
         "            http_middleware_add(&chain, http_security_middleware, NULL);\n"
+        "        }\n"
+        "        if (gzip) {\n"
+        "            // --gzip compresses compressible bodies on the way out\n"
+        "            http_middleware_add(&chain, http_gzip_middleware, NULL);\n"
         "        }\n"
         "        if (rate_per_min > 0) {\n"
         "            http_middleware_add(&chain, http_rate_limit_middleware,\n"
@@ -713,7 +721,7 @@ static int cmd_build(int argc, char **argv)
     }
     strbuf_append_cstr(&cc, " ");
     strbuf_append_cstr(&cc, root);
-    strbuf_append_cstr(&cc, "/build/libcweb.a -o ");
+    strbuf_append_cstr(&cc, "/build/libcweb.a -lz -o ");
     strbuf_append_cstr(&cc, bin_path);
     strbuf_null_terminate(&cc);
     int rc = system(cc.items);
@@ -1074,8 +1082,8 @@ static void usage(FILE *f)
         "  serve [--watch] VIEWS_DIR [PORT [ROOT [STATIC]]] [FLAGS...]\n"
         "                                  build into a scratch dir and run it;\n"
         "                                  --watch rebuilds and restarts on change;\n"
-        "                                  FLAGS pass through to the server\n"
-        "                                  (e.g. --rate 30 --secure)\n"
+"                                  FLAGS pass through to the server\n"
+         "                                  (e.g. --rate 30 --secure --gzip)\n"
         "  new APP_DIR                     scaffold a runnable app skeleton\n"
         "  version                         print the framework version\n"
         "\n"
@@ -1091,10 +1099,11 @@ static void usage(FILE *f)
         "routed, it embeds the captured page body with\n"
         "<?c cweb_tpl_layout_emit(res); ?> and so shapes every\n"
         "page (including the 404 page).\n"
-        "The built OUT_DIR/server accepts --port N, --rate N (a per-client\n"
-        "budget of N requests a minute), --secure (hardening headers on\n"
-        "every response) and --db PATH (a file-backed key-value store pages\n"
-        "reach through cweb_database()).\n");
+"The built OUT_DIR/server accepts --port N, --rate N (a per-client\n"
+         "budget of N requests a minute), --secure (hardening headers on\n"
+         "every response), --gzip (compress compressible bodies) and\n"
+         "--db PATH (a file-backed key-value store pages reach through\n"
+         "cweb_database()).\n");
 }
 
 int main(int argc, char **argv)
