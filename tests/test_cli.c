@@ -1012,6 +1012,110 @@ int main(void)
     waitpid(cs_child, NULL, 0);
     ok = ok && cs_ok;
 
+    // --- validation: a POST is checked, one readable error, values kept ---
+    char vv[1024], vo[1024];
+    snprintf(vv, sizeof vv, "%s/vv", tmp);
+    mkdir(vv, 0755);
+    snprintf(vo, sizeof vo, "%s/vo", tmp);
+    snprintf(wbuf, sizeof wbuf, "%s/index.c.html", vv);
+    wfile(wbuf,
+          "<?c\n"
+          "  Http_Session_Store *vs = (Http_Session_Store *)user_data;\n"
+          "  Http_Session *sesh = http_session_from_cookie(vs, req, \"v_session\");\n"
+          "  if (sesh == NULL) {\n"
+          "      char *tok = http_session_create(vs, -1);\n"
+          "      if (tok != NULL) {\n"
+          "          sesh = http_session_open(vs, tok);\n"
+          "          http_session_issue_cookie(res, \"v_session\", tok, NULL);\n"
+          "      }\n"
+          "  }\n"
+          "  const char *error = NULL;\n"
+          "  if (req->method == HTTP_POST) {\n"
+          "      Http_Form form;\n"
+          "      http_form_init(&form);\n"
+          "      long age = 0;\n"
+          "      http_form_required(&form, params, \"username\", \"username\");\n"
+          "      http_form_email(&form, params, \"email\", \"email\");\n"
+          "      http_form_int(&form, params, \"age\", \"age\", 13, 150, &age);\n"
+          "      if (!http_form_ok(&form)) {\n"
+          "          error = http_form_error(&form);\n"
+          "      } else {\n"
+          "          http_response_redirect(res, HTTP_303_SEE_OTHER, \"/?saved=1\");\n"
+          "          return;\n"
+          "      }\n"
+          "  }\n"
+          "?>\n"
+          "<h1>Join</h1>\n"
+          "<?c if (error) { ?><p class=\"err\"><?h= sv_from_cstr(error) ?></p><?c } ?>\n"
+          "<form method=\"post\" action=\"/\">\n"
+          "  <input name=\"username\" <?c http_form_value(res, params, \"username\"); ?>>\n"
+          "  <input name=\"email\" <?c http_form_value(res, params, \"email\"); ?>>\n"
+          "  <input name=\"age\" <?c http_form_value(res, params, \"age\"); ?>>\n"
+          "  <button>Join</button>\n"
+          "</form>");
+    snprintf(wbuf, sizeof wbuf, "%s build %s %s >/dev/null", TOOL, vv, vo);
+    if (system(wbuf) != 0) {
+        fprintf(stderr, "cweb build failed for the validation fixture\n");
+        return 1;
+    }
+    probe = net_listen(0);
+    int vv_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", vv_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", vo);
+    pid_t vv_child = fork();
+    if (vv_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(vv_port) != 0) {
+        fprintf(stderr, "validation server did not come up on port %d\n", vv_port);
+        return 1;
+    }
+    char *vv_body = fetch_req(vv_port, "GET", "/", NULL, NULL);
+    char vv_cookie[160];
+    grab_cookie(vv_body, "v_session", vv_cookie, sizeof vv_cookie);
+    int vv_ok = vv_body != NULL && strstr(vv_body, "HTTP/1.1 200 OK") != NULL &&
+                strstr(vv_body, "<form method=\"post\" action=\"/\">") != NULL &&
+                vv_cookie[0] != '\0';
+    if (!vv_ok) {
+        fprintf(stderr, "the form should be served with a session cookie:\n%.140s\n", vv_body ? vv_body : "(connect error)");
+    }
+    free(vv_body);
+
+    snprintf(wbuf, sizeof wbuf, "v_session=%s", vv_cookie);
+    vv_body = fetch_req(vv_port, "POST", "/", wbuf, "");
+    vv_ok = vv_ok && vv_body != NULL &&
+            strstr(vv_body, "<p class=\"err\">username is required.</p>") != NULL;
+    if (!vv_ok) {
+        fprintf(stderr, "a POST with a missing username should show the required error:\n%.160s\n", vv_body ? vv_body : "(connect error)");
+    }
+    free(vv_body);
+
+    vv_body = fetch_req(vv_port, "POST", "/", wbuf,
+                        "username=alice&email=b%40c.co&age=12");
+    vv_ok = vv_ok && vv_body != NULL &&
+            strstr(vv_body, "<p class=\"err\">age must be between 13 and 150.</p>") != NULL &&
+            strstr(vv_body, "value=\"alice\"") != NULL &&
+            strstr(vv_body, "value=\"b@c.co\"") != NULL &&
+            strstr(vv_body, "value=\"12\"") != NULL;
+    if (!vv_ok) {
+        fprintf(stderr, "a POST with an out-of-range age should keep the typed values:\n%.180s\n", vv_body ? vv_body : "(connect error)");
+    }
+    free(vv_body);
+
+    vv_body = fetch_req(vv_port, "POST", "/", wbuf,
+                        "username=alice&email=b%40c.co&age=25");
+    vv_ok = vv_ok && vv_body != NULL && strstr(vv_body, "HTTP/1.1 303") != NULL &&
+            strstr(vv_body, "Location: /?saved=1") != NULL;
+    if (!vv_ok) {
+        fprintf(stderr, "a valid POST should redirect:\n%.140s\n", vv_body ? vv_body : "(connect error)");
+    }
+    free(vv_body);
+    kill(vv_child, SIGTERM);
+    waitpid(vv_child, NULL, 0);
+    ok = ok && vv_ok;
+
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];
     snprintf(logpath, sizeof logpath, "%s/access.log", tmp);
