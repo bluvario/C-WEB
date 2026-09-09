@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "file.h"
@@ -154,6 +155,51 @@ int main(void)
     strbuf_free(&err);
     strbuf_init(&err);
 
+    // --- unit: the date and time formatting helpers ---
+    http_response_init(&res);
+    cweb_tpl_date(&res, 0);
+    check("http-date helper renders GMT epoch",
+          res.body.count == 29 && strncmp(res.body.items, "Thu, 01 Jan 1970 00:00:00 GMT", 29) == 0);
+    http_response_free(&res);
+
+    // a fixed UTC clock makes the local stamps deterministic
+    char saved_tz[128];
+    const char *tz = getenv("TZ");
+    if (tz != NULL) {
+        snprintf(saved_tz, sizeof saved_tz, "%s", tz);
+    } else {
+        saved_tz[0] = '\0';
+    }
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    http_response_init(&res);
+    cweb_tpl_date_local(&res, 0);
+    check("local stamp helper renders epoch",
+          res.body.count == 19 && strncmp(res.body.items, "1970-01-01 00:00:00", 19) == 0);
+    http_response_free(&res);
+    http_response_init(&res);
+    cweb_tpl_strftime(&res, "%a %b %Y", 0);
+    check("strftime helper formats",
+          strncmp(res.body.items, "Thu Jan 1970", sizeof("Thu Jan 1970") - 1) == 0 &&
+          res.body.count == sizeof("Thu Jan 1970") - 1);
+    http_response_free(&res);
+    http_response_init(&res);
+    cweb_tpl_now(&res);
+    check("now helper yields a local stamp",
+          res.body.count == 19 && res.body.items[4] == '-' && res.body.items[7] == '-' &&
+          res.body.items[13] == ':' && res.body.items[16] == ':');
+    http_response_free(&res);
+    if (saved_tz[0] != '\0') {
+        setenv("TZ", saved_tz, 1);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+    strbuf_free(&out);
+    strbuf_init(&out);
+    strbuf_free(&err);
+    strbuf_init(&err);
+
     // --- integration: compile a whole page and run it through the library ---
     const char *page =
         "<h1>Page</h1>\n"
@@ -163,7 +209,8 @@ int main(void)
         "snprintf(numbuf, sizeof numbuf, \"%d\", x);\n"
         "?>\n"
         "you are <?c= numbuf ?>\n"
-        "safe <?h= sv_from_cstr(\"<b>&</b>\") ?>\n";
+        "safe <?h= sv_from_cstr(\"<b>&</b>\") ?>\n"
+        "<time><?c cweb_tpl_date(res, (time_t)0); ?></time>\n";
 
     char tpl_dir[64];
     strcpy(tpl_dir, "/tmp/cweb_template_test_XXXXXX");
@@ -184,6 +231,7 @@ int main(void)
     check("derived function name", has(&out, "void page_hello("));
     check("block kept its body content", has(&out, "int x = 6 * 7;"));
     check("escape helper emitted for <?h=", has(&out, "static void cweb_tpl_escape"));
+    check("date helper call kept in the page", has(&out, "cweb_tpl_date(res, (time_t)0);"));
     check("no errors", err.count == 0);
 
     // the runner links the generated handler against the real library and the
@@ -219,7 +267,8 @@ int main(void)
         "    http_response_init(&res);\n"
         "    page_hello(&req, &res, NULL, NULL);\n"
         "    const char *want = \"<h1>Page</h1>\\n\\nyou are 42\\n\"\n"
-        "                      \"safe &lt;b&gt;&amp;&lt;/b&gt;\\n\";\n"
+        "                      \"safe &lt;b&gt;&amp;&lt;/b&gt;\\n\"\n"
+        "                      \"<time>Thu, 01 Jan 1970 00:00:00 GMT</time>\\n\";\n"
         "    int ok = res.body.count == strlen(want) &&\n"
         "             memcmp(res.body.items, want, res.body.count) == 0;\n"
         "    if (ok) {\n"

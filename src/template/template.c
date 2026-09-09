@@ -1,9 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "template.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "date.h"
 #include "file.h"
 #include "response.h"
 #include "strbuf.h"
@@ -48,6 +51,48 @@ String_View cweb_tpl_layout_body(void)
 void cweb_tpl_layout_emit(Http_Response *res)
 {
     cweb_tpl_add(res, cap_buf.items, cap_buf.count);
+}
+
+// broken-down local time, portable across the windows/unix localtime split
+static void tpl_localtime(time_t t, struct tm *tm)
+{
+#ifdef _WIN32
+    localtime_s(tm, &t);
+#else
+    localtime_r(&t, tm);
+#endif
+}
+
+void cweb_tpl_date(Http_Response *res, time_t t)
+{
+    char buf[32] = "";
+    http_date_rfc7231(t, buf, sizeof buf);
+    cweb_tpl_add(res, buf, strlen(buf));
+}
+
+void cweb_tpl_date_local(Http_Response *res, time_t t)
+{
+    struct tm tm;
+    tpl_localtime(t, &tm);
+    char buf[32];
+    buf[0] = '\0';
+    strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm);
+    cweb_tpl_add(res, buf, strlen(buf));
+}
+
+void cweb_tpl_strftime(Http_Response *res, const char *fmt, time_t t)
+{
+    struct tm tm;
+    tpl_localtime(t, &tm);
+    char buf[128];
+    buf[0] = '\0';
+    strftime(buf, sizeof buf, fmt, &tm);
+    cweb_tpl_add(res, buf, strlen(buf));
+}
+
+void cweb_tpl_now(Http_Response *res)
+{
+    cweb_tpl_date_local(res, time(NULL));
 }
 
 // a page's static text rides inside cweb_tpl_out() calls, escaped so it
