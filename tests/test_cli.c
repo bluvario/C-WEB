@@ -387,6 +387,10 @@ int main(void)
                     strstr(main, "--workers") != NULL &&
                     strstr(main, "--signature-secret") != NULL &&
                     strstr(main, "Http_Signature_Options sig_opts = {0};") != NULL &&
+                    strstr(main, "--csp") != NULL &&
+                    strstr(main, "--csp-report-only") != NULL &&
+                    strstr(main, "Http_Security_Options sec_opts = {0};") != NULL &&
+                    strstr(main, "Content-Security-Policy overrides from --csp") != NULL &&
                     strstr(main, "cweb_size_arg") != NULL &&
                     strstr(main, "http_serve_config(listener, router_dispatch, &r, &cfg)") != NULL &&
                     strstr(main, "cfg.max_body = cweb_max_body;") != NULL &&
@@ -1440,6 +1444,117 @@ int main(void)
     kill(sg_child, SIGTERM);
     waitpid(sg_child, NULL, 0);
     ok = ok && sg_ok;
+
+    // --- --csp/--csp-report-only: both policies on every response, and ---
+    // --- --routes echoes them only while set ----------------------------
+    int csp_ok = 1;
+    snprintf(wbuf, sizeof wbuf, "%s/server", out);
+
+    snprintf(routes_file, sizeof routes_file, "%s/croutes.txt", tmp);
+    rp = fork();
+    if (rp == 0) {
+        int fd = open(routes_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        execl(wbuf, "server", "--csp", "default-src 'self'; img-src *",
+              "--csp-report-only",
+              "default-src 'none'; report-uri /csp-violation", "--routes", NULL);
+        _exit(127);
+    }
+    waitpid(rp, NULL, 0);
+    rf = fopen(routes_file, "r");
+    rc = malloc(4096);
+    rn = fread(rc, 1, 4095, rf);
+    rc[rn] = '\0';
+    fclose(rf);
+    csp_ok = csp_ok && strstr(rc, "csp: default-src 'self'; img-src *") != NULL &&
+             strstr(rc, "csp-report-only: default-src 'none'; report-uri /csp-violation") != NULL;
+    if (!csp_ok) {
+        fprintf(stderr, "--routes should echo both CSP policies when set:\n%s\n", rc);
+    }
+    free(rc);
+    snprintf(routes_file, sizeof routes_file, "%s/croutes2.txt", tmp);
+    rp = fork();
+    if (rp == 0) {
+        int fd = open(routes_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        execl(wbuf, "server", "--routes", NULL);
+        _exit(127);
+    }
+    waitpid(rp, NULL, 0);
+    rf = fopen(routes_file, "r");
+    rc = malloc(4096);
+    rn = fread(rc, 1, 4095, rf);
+    rc[rn] = '\0';
+    fclose(rf);
+    csp_ok = csp_ok && strstr(rc, "csp:") == NULL &&
+             strstr(rc, "csp-report-only:") == NULL;
+    if (!csp_ok) {
+        fprintf(stderr, "--routes without CSP flags should not mention them:\n%s\n", rc);
+    }
+    free(rc);
+
+    probe = net_listen(0);
+    int csp_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", csp_port);
+    pid_t csp_child = fork();
+    if (csp_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--csp",
+              "default-src 'self'; img-src *", "--csp-report-only",
+              "default-src 'none'; report-uri /csp-violation", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(csp_port) != 0) {
+        fprintf(stderr, "csp server did not come up on port %d\n", csp_port);
+        return 1;
+    }
+    char *csp_body = fetch(csp_port, "/");
+    csp_ok = csp_ok && csp_body != NULL &&
+             strstr(csp_body, "HTTP/1.1 200 OK") != NULL &&
+             strstr(csp_body, "Content-Security-Policy: default-src 'self'; img-src *") != NULL &&
+             strstr(csp_body, "Content-Security-Policy-Report-Only: "
+                              "default-src 'none'; report-uri /csp-violation") != NULL &&
+             strstr(csp_body, "X-Content-Type-Options: nosniff") != NULL;
+    if (!csp_ok) {
+        fprintf(stderr, "--csp must stamp both policies on responses:\n%.160s\n",
+                csp_body ? csp_body : "(connect error)");
+    }
+    free(csp_body);
+    kill(csp_child, SIGTERM);
+    waitpid(csp_child, NULL, 0);
+
+    // --csp-report-only alone still turns the security middleware on, so the
+    // enforced default directive and the monitoring policy both appear
+    probe = net_listen(0);
+    int csp2_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", csp2_port);
+    pid_t csp2_child = fork();
+    if (csp2_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--csp-report-only",
+              "default-src 'self'; report-uri /csp-violation", NULL);
+        _exit(127);
+    }
+    if (wait_for_port(csp2_port) != 0) {
+        fprintf(stderr, "csp-report-only server did not come up on port %d\n", csp2_port);
+        return 1;
+    }
+    char *csp2_body = fetch(csp2_port, "/");
+    csp_ok = csp_ok && csp2_body != NULL &&
+             strstr(csp2_body, "HTTP/1.1 200 OK") != NULL &&
+             strstr(csp2_body, "Content-Security-Policy: default-src 'self'") != NULL &&
+             strstr(csp2_body, "Content-Security-Policy-Report-Only: "
+                               "default-src 'self'; report-uri /csp-violation") != NULL;
+    if (!csp_ok) {
+        fprintf(stderr, "--csp-report-only alone keeps the default CSP:\n%.160s\n",
+                csp2_body ? csp2_body : "(connect error)");
+    }
+    free(csp2_body);
+    kill(csp2_child, SIGTERM);
+    waitpid(csp2_child, NULL, 0);
+    ok = ok && csp_ok;
 
     // --- --log appends a Common Log Format line per completed request ---
     char logpath[1024];

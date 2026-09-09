@@ -71,6 +71,44 @@ int main(void)
     http_response_free(&res);
     strbuf_free(&w2);
 
+    // the options form pairs a CSP with a monitoring-only policy, and leaves
+    // it out when no report-only value is given
+    Http_Security_Options both = {0};
+    both.csp = "default-src https://cdn.example";
+    both.csp_report_only = "default-src 'self'; report-uri /csp-violation";
+    http_response_init(&res);
+    http_response_security_headers_opts(&res, &both);
+    Strbuf w5;
+    strbuf_init(&w5);
+    http_response_serialize(&res, &w5);
+    strbuf_null_terminate(&w5);
+    fails += check("options stamp both CSP headers",
+        strstr(w5.items,
+               "Content-Security-Policy: default-src https://cdn.example\r\n") != NULL &&
+        strstr(w5.items,
+               "Content-Security-Policy-Report-Only: "
+               "default-src 'self'; report-uri /csp-violation\r\n") != NULL);
+    http_response_free(&res);
+    strbuf_free(&w5);
+
+    // a report-only policy alone still stamps the default directive as the
+    // enforced CSP, never two Content-Security-Policy headers
+    Http_Security_Options ro_only = {0};
+    ro_only.csp_report_only = "default-src 'self'; report-uri /csp-violation";
+    http_response_init(&res);
+    http_response_security_headers_opts(&res, &ro_only);
+    Strbuf w6;
+    strbuf_init(&w6);
+    http_response_serialize(&res, &w6);
+    strbuf_null_terminate(&w6);
+    fails += check("report-only alone keeps the default CSP",
+        strstr(w6.items, "Content-Security-Policy: default-src 'self'") != NULL &&
+        strstr(w6.items,
+               "Content-Security-Policy-Report-Only: "
+               "default-src 'self'; report-uri /csp-violation\r\n") != NULL);
+    http_response_free(&res);
+    strbuf_free(&w6);
+
     // the middleware stamps the same headers, then hands control onward
     http_response_init(&res);
     http_security_middleware(NULL, &res, NULL, recorder, NULL);
@@ -86,16 +124,18 @@ int main(void)
     http_response_free(&res);
     strbuf_free(&w3);
 
-    // a user_data csp override flows through the middleware unchanged
+    // a user_data options csp override flows through the middleware unchanged
     http_response_init(&res);
-    http_security_middleware(NULL, &res, "default-src 'none'; upgrade-insecure-requests",
-                             recorder, NULL);
+    http_security_middleware(NULL, &res, &both, recorder, NULL);
     Strbuf w4;
     strbuf_init(&w4);
     http_response_serialize(&res, &w4);
     strbuf_null_terminate(&w4);
-    fails += check("middleware honors the csp override",
-        strstr(w4.items, "Content-Security-Policy: default-src 'none'; upgrade-insecure-requests\r\n") != NULL);
+    fails += check("middleware honors the options override",
+        strstr(w4.items, "Content-Security-Policy: default-src https://cdn.example\r\n") != NULL &&
+        strstr(w4.items,
+               "Content-Security-Policy-Report-Only: "
+               "default-src 'self'; report-uri /csp-violation\r\n") != NULL);
     http_response_free(&res);
     strbuf_free(&w4);
 

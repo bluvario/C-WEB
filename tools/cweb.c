@@ -381,6 +381,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// NULL keeps request signing off entirely\n"
         "static const char *cweb_signature_secret = NULL;\n"
         "\n"
+        "// Content-Security-Policy overrides from --csp and --csp-report-only;\n"
+        "// NULL keeps the middleware's built-in default directive\n"
+        "static const char *cweb_csp = NULL;\n"
+        "static const char *cweb_csp_report_only = NULL;\n"
+        "\n"
         "// parses \"8192\", \"8k\", \"8K\", \"2m\", \"1g\" into bytes for\n"
         "// --max-body; 0 on an empty or non-numeric argument\n"
         "static size_t cweb_size_arg(const char *s)\n"
@@ -458,6 +463,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
           f);
     fputs("    if (cweb_signature_secret != NULL) "
           "printf(\"signature: on\\n\");\n",
+          f);
+    fputs("    if (cweb_csp != NULL) "
+          "printf(\"csp: %s\\n\", cweb_csp);\n",
+          f);
+    fputs("    if (cweb_csp_report_only != NULL) "
+          "printf(\"csp-report-only: %s\\n\", cweb_csp_report_only);\n",
           f);
     if (has_404) {
         fputs("    printf(\"404: * (fallback)\\n\");\n", f);
@@ -565,8 +576,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
 "        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
             "            cweb_workers = strtoul(argv[++i], NULL, 10);\n"
             "        } else if (strcmp(argv[i], \"--signature-secret\") == 0 && i + 1 < argc) {\n"
-            "            cweb_signature_secret = argv[++i];\n"
-        "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
+"            cweb_signature_secret = argv[++i];\n"
+             "        } else if (strcmp(argv[i], \"--csp\") == 0 && i + 1 < argc) {\n"
+             "            cweb_csp = argv[++i];\n"
+             "        } else if (strcmp(argv[i], \"--csp-report-only\") == 0 && i + 1 < argc) {\n"
+             "            cweb_csp_report_only = argv[++i];\n"
+         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
         "        } else {\n"
@@ -677,10 +692,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    cfg.max_body = cweb_max_body;\n"
         "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
         "    cfg.workers = cweb_workers;\n"
-        "    if (rate_per_min > 0 || secure || gzip || cweb_signature_secret != NULL) {\n"
+        "    if (rate_per_min > 0 || secure || gzip || cweb_signature_secret != NULL ||\n"
+        "        cweb_csp != NULL || cweb_csp_report_only != NULL) {\n"
         "        // hardening headers, (optionally) a per-client request\n"
-        "        // budget, gzip wrapping, and a shared-secret signature\n"
-        "        // check run around every response\n"
+        "        // budget, gzip wrapping, a shared-secret signature, and a\n"
+        "        // Content-Security-Policy run around every response\n"
         "        Http_RateLimiter limiter;\n"
         "        if (rate_per_min > 0) {\n"
         "            // N requests a minute per client: the bucket starts full\n"
@@ -696,10 +712,19 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            // from a proxy holding the same secret, 403 otherwise\n"
         "            sig_opts.secret = cweb_signature_secret;\n"
         "        }\n"
+        "        // --csp overrides the middleware's default directive;\n"
+        "        // --csp-report-only adds a monitoring-only policy on top\n"
+        "        Http_Security_Options sec_opts = {0};\n"
+        "        if (cweb_csp != NULL || cweb_csp_report_only != NULL) {\n"
+        "            sec_opts.csp = cweb_csp;\n"
+        "            sec_opts.csp_report_only = cweb_csp_report_only;\n"
+        "        }\n"
         "        Http_Middleware_Chain chain;\n"
         "        http_middleware_init(&chain);\n"
-        "        if (secure) {\n"
-        "            http_middleware_add(&chain, http_security_middleware, NULL);\n"
+        "        if (secure || cweb_csp != NULL || cweb_csp_report_only != NULL) {\n"
+        "            http_middleware_add(&chain, http_security_middleware,\n"
+        "                                (cweb_csp != NULL || cweb_csp_report_only != NULL)\n"
+        "                                    ? &sec_opts : NULL);\n"
         "        }\n"
         "        if (cweb_signature_secret != NULL) {\n"
         "            http_middleware_add(&chain, http_signature_middleware,\n"
@@ -1319,6 +1344,9 @@ static void usage(FILE *f)
           "--signature-secret SECRET (fall back on a reverse proxy that stamps\n"
           "every request with HMAC-SHA256 of \"METHOD\\nPATH\\nUNIX-SECONDS\\nBODY\"\n"
           "in X-CWEB-Signature/X-CWEB-Date; anything else is answered 403), and\n"
+          "--csp POLICY (Content-Security-Policy on every response, replacing\n"
+          "the built-in default-src 'self' directive) and --csp-report-only\n"
+          "POLICY (a monitoring-only policy alongside it), and\n"
           "--log FILE (append Common Log Format access lines to FILE).\n");
 }
 
