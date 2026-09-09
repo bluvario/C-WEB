@@ -187,6 +187,7 @@ int main(void)
                     strstr(main, "#include \"template.h\"") != NULL &&
                     strstr(main, "#include \"db.h\"") != NULL &&
                     strstr(main, "#include \"gzip.h\"") != NULL &&
+                    strstr(main, "#include \"log.h\"") != NULL &&
                     strstr(main, "cweb_tpl_capture_begin") != NULL &&
                     strstr(main, "static void cweb_wrap_hello(") != NULL &&
                     strstr(main, "static void cweb_wrap_fallback(") != NULL &&
@@ -196,6 +197,8 @@ int main(void)
                     strstr(main, "cweb_rate_key") != NULL &&
                     strstr(main, "--secure") != NULL &&
                     strstr(main, "--gzip") != NULL &&
+                    strstr(main, "--log") != NULL &&
+                    strstr(main, "log_set_clf(clf_file)") != NULL &&
                     strstr(main, "--db") != NULL &&
                     strstr(main, "cweb_db_open(&cweb_database_impl, db_path)") != NULL &&
                     strstr(main, "cweb_db_close(&cweb_database_impl)") != NULL &&
@@ -721,6 +724,72 @@ int main(void)
     kill(gz_child, SIGTERM);
     waitpid(gz_child, NULL, 0);
     ok = ok && gz_plain_ok && gz_ok;
+
+    // --- --log appends a Common Log Format line per completed request ---
+    char logpath[1024];
+    snprintf(logpath, sizeof logpath, "%s/access.log", tmp);
+    probe = net_listen(0);
+    int lg_port = net_bound_port(probe);
+    net_close(probe);
+    snprintf(port_arg, sizeof port_arg, "%d", lg_port);
+    snprintf(wbuf, sizeof wbuf, "%s/server", out);
+    pid_t lg_child = fork();
+    if (lg_child == 0) {
+        execl(wbuf, "server", "--port", port_arg, "--log", logpath, NULL);
+        _exit(127);
+    }
+    if (wait_for_port(lg_port) != 0) {
+        fprintf(stderr, "log server did not come up on port %d\n", lg_port);
+        return 1;
+    }
+    char *lg_body = fetch(lg_port, "/");
+    int lg_served = lg_body != NULL && strstr(lg_body, "HTTP/1.1 200 OK") != NULL &&
+                    strstr(lg_body, "<h1>Index</h1>") != NULL;
+    // keep-alive this time: two requests on one connection must log two lines
+    Socket_Handle k = net_connect("127.0.0.1", lg_port);
+    if (k != -1) {
+        char two[1200];
+        snprintf(two, sizeof two,
+                 "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                 "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                 "Connection: close\r\n\r\n");
+        net_send_all(k, two, strlen(two));
+        char sink[4096];
+        while (net_recv(k, sink, sizeof sink) > 0) {
+        }
+        net_close(k);
+    }
+    free(lg_body);
+    kill(lg_child, SIGTERM);
+    waitpid(lg_child, NULL, 0);
+    FILE *lgf = fopen(logpath, "r");
+    if (lgf == NULL) {
+        fprintf(stderr, "no access log written at %s\n", logpath);
+        return 1;
+    }
+    char lgline[512];
+    int lg_lines = 0, lg_root = 0, lg_hello = 0, lg_shape = 1;
+    while (fgets(lgline, sizeof lgline, lgf) != NULL) {
+        long line_len = strlen(lgline);
+        char *bytes = strstr(lgline, " 200 ");
+        if (line_len == 0 || lgline[line_len - 1] != '\n' ||
+            strstr(lgline, "127.0.0.1 - - [") == NULL ||
+            strstr(lgline, "] \"") == NULL || bytes == NULL ||
+            bytes[5] == '-' || bytes[5] < '0' || bytes[5] > '9') {
+            lg_shape = 0;
+        }
+        lg_root += strstr(lgline, "\"GET / HTTP/1.1\" 200 ") != NULL ? 1 : 0;
+        lg_hello += strstr(lgline, "\"GET /hello HTTP/1.1\" 200 ") != NULL ? 1 : 0;
+        lg_lines++;
+    }
+    fclose(lgf);
+    if (!lg_served || !lg_shape || lg_lines < 2 || lg_root < 1 || lg_hello < 1) {
+        fprintf(stderr,
+                "access log wrong (served %d, shape %d, lines %d, root %d, hello %d)\n",
+                lg_served, lg_shape, lg_lines, lg_root, lg_hello);
+        return 1;
+    }
+    ok = ok && lg_served && lg_shape && lg_hello >= 1;
 
     // --- cweb serve --watch rebuilds and restarts on change ---
     char wv[1024], ws[1024];

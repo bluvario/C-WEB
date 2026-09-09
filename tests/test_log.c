@@ -48,6 +48,34 @@ int main(void)
         return 1;
     }
 
+    // the access-log sink only writes when configured, and then whole lines
+    log_set_clf(NULL);
+    log_clf_line("never written", 13);
+    FILE *clf = tmpfile();
+    if (!clf) {
+        fprintf(stderr, "tmpfile failed for the access log\n");
+        return 1;
+    }
+    log_set_clf(clf);
+    const char *sample = "127.0.0.1 - - [01/Jan/1970:00:00:00 +0000] "
+                         "\"GET /notes HTTP/1.1\" 200 42";
+    log_clf_line(sample, strlen(sample));
+    log_set_clf(NULL);
+    rewind(clf);
+    char line[160];
+    if (fgets(line, sizeof line, clf) == NULL) {
+        fclose(clf);
+        fprintf(stderr, "could not read the access log back\n");
+        return 1;
+    }
+    fclose(clf);
+    if (strstr(line, "[01/Jan/1970:00:00:00 +0000]") == NULL ||
+        strstr(line, "\"GET /notes HTTP/1.1\" 200 42") == NULL ||
+        line[strlen(line) - 1] != '\n') {
+        fprintf(stderr, "access log line malformed: %s\n", line);
+        return 1;
+    }
+
     printf("log ok\n");
     return 0;
 }

@@ -16,6 +16,12 @@ void log_set_output(FILE *out);
 
 void log_log(Log_Level level, const char *fmt, ...);
 
+// a second, dedicated sink for Common Log Format access lines (--log FILE).
+// NULL (the default) makes log_clf_line a no-op. lines are written whole
+// under the stream lock, so worker threads cannot interleave partial lines.
+void log_set_clf(FILE *fh);
+void log_clf_line(const char *data, size_t len);
+
 #define log_debug(...) log_log(LOG_DEBUG, __VA_ARGS__)
 #define log_info(...) log_log(LOG_INFO, __VA_ARGS__)
 #define log_warn(...) log_log(LOG_WARN, __VA_ARGS__)

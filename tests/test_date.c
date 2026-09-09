@@ -1,4 +1,7 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "date.h"
@@ -60,6 +63,38 @@ int main(void)
         fprintf(stderr, "garbage date should fail\n");
         return 1;
     }
+
+    // Common Log Format clock: dd/Mon/yyyy:hh:mm:ss +zzzz, local time
+    http_date_clf(time(NULL), buf, sizeof(buf));
+    int clf_shape_ok = strlen(buf) == 26 && buf[2] == '/' && buf[6] == '/' &&
+                       buf[11] == ':' && buf[14] == ':' && buf[17] == ':' &&
+                       buf[20] == ' ' && (buf[21] == '+' || buf[21] == '-') &&
+                       buf[22] >= '0' && buf[22] <= '9' && buf[26] == '\0';
+    if (!clf_shape_ok) {
+        fprintf(stderr, "clf date shape wrong: %s\n", buf);
+        return 1;
+    }
+    // under UTC the epoch becomes a fully determined record
+    char saved_tz[128];
+    const char *tz = getenv("TZ");
+    if (tz != NULL) {
+        snprintf(saved_tz, sizeof saved_tz, "%s", tz);
+    } else {
+        saved_tz[0] = '\0';
+    }
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    http_date_clf(0, buf, sizeof(buf));
+    if (strcmp(buf, "01/Jan/1970:00:00:00 +0000") != 0) {
+        fprintf(stderr, "clf epoch under UTC wrong: %s\n", buf);
+        return 1;
+    }
+    if (saved_tz[0] != '\0') {
+        setenv("TZ", saved_tz, 1);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
 
     printf("date ok\n");
     return 0;

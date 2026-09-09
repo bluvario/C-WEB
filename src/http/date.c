@@ -59,6 +59,30 @@ char *http_date_now(char *buf, size_t bufsize)
     return http_date_rfc7231(time(NULL), buf, bufsize);
 }
 
+char *http_date_clf(time_t t, char *buf, size_t bufsize)
+{
+    struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    // localtime gives the wall clock; mktime of those parts back into seconds
+    // yields the local mean offset, which is what CLF wants signed as %z
+    long off = (long)(mktime(&tm) - t);
+    int oh = (int)(off / 3600);
+    int om = (int)((off % 3600) / 60);
+    if (oh < -12 || oh > 14) {
+        oh = 0; // clock skew should not print garbage offsets
+        om = 0;
+    }
+    snprintf(buf, bufsize, "%02d/%s/%04d:%02d:%02d:%02d %c%02d%02d",
+             tm.tm_mday, months[tm.tm_mon], tm.tm_year + 1900,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             off < 0 ? '-' : '+', oh < 0 ? -oh : oh, om < 0 ? -om : om);
+    return buf;
+}
+
 time_t http_date_parse(String_View text)
 {
     // IMF-fixdate is the only form we emit: fixed 29 characters, so a format

@@ -54,6 +54,60 @@ static void log_request(Http_Request *req, Http_Response *res, unsigned long lon
              (int)res->status, elapsed_ms);
 }
 
+// copies one request field into an access-log line, \xHH-encoding bytes that
+// would break a single-line record: the quote that delimits the request
+// field, the backslash, and any control character a hostile path might carry
+static void clf_append_escaped(Strbuf *line, String_View s)
+{
+    for (size_t i = 0; i < s.count; i++) {
+        unsigned char c = (unsigned char)s.data[i];
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') {
+            char esc[8];
+            snprintf(esc, sizeof esc, "\\x%02X", c);
+            strbuf_append_cstr(line, esc);
+        } else {
+            strbuf_append_char(line, (char)c);
+        }
+    }
+}
+
+// one Common Log Format record per completed request: host ident authuser
+// [date] "METHOD PATH VERSION" status bytes. nothing is written unless a
+// sink was configured with log_set_clf (the --log flag on generated servers).
+// bytes is the entity size actually sent; 0 or negative becomes "-".
+static void log_access(Http_Request *req, Http_Response *res, long long bytes)
+{
+    char date[40];
+    http_date_clf(time(NULL), date, sizeof date);
+    if (req->remote.count == 0) {
+        req->remote = sv_from_cstr("0.0.0.0"); // match the peer fallback
+    }
+    Strbuf line;
+    strbuf_init(&line);
+    strbuf_append(&line, req->remote.data, req->remote.count);
+    strbuf_append_cstr(&line, " - - [");
+    strbuf_append_cstr(&line, date);
+    strbuf_append_cstr(&line, "] \"");
+    const char *method = http_method_name(req->method);
+    strbuf_append_cstr(&line, method != NULL ? method : "???");
+    strbuf_append_char(&line, ' ');
+    clf_append_escaped(&line, req->path);
+    strbuf_append_char(&line, ' ');
+    clf_append_escaped(&line, req->version);
+    strbuf_append_cstr(&line, "\" ");
+    snprintf(date, sizeof date, "%d", (int)res->status);
+    strbuf_append_cstr(&line, date);
+    strbuf_append_char(&line, ' ');
+    if (bytes > 0) {
+        snprintf(date, sizeof date, "%lld", bytes);
+        strbuf_append_cstr(&line, date);
+    } else {
+        strbuf_append_char(&line, '-');
+    }
+    log_clf_line(line.items, line.count);
+    strbuf_free(&line);
+}
+
 static void send_wire(Socket_Handle client, Http_Response *res)
 {
     Strbuf wire;
@@ -70,12 +124,14 @@ static void send_wire(Socket_Handle client, Http_Response *res)
 // drained into wire-sized frames until it reports the stream over. a raw
 // "0\r\n\r\n" balance frame closes it. for HEAD the metadata is delivered but
 // the chunked body is not, mirroring what a GET with a body would send.
-static void send_stream(Socket_Handle client, Http_Response *res, bool send_body)
+// returns the number of streamed entity bytes (0 for HEAD).
+static long long send_stream(Socket_Handle client, Http_Response *res, bool send_body)
 {
     send_wire(client, res); // head only: serialize skips the stream body
     if (!send_body) {
-        return;
+        return 0;
     }
+    long long sent = 0;
     char chunk[8192];
     for (;;) {
         size_t n = res->stream_fn(chunk, sizeof(chunk), res->stream_user);
@@ -85,6 +141,7 @@ static void send_stream(Socket_Handle client, Http_Response *res, bool send_body
         if (n > sizeof(chunk)) {
             break; // corrupt producer, stop rather than buffer forever
         }
+        sent += (long long)n;
         char size_line[32];
         int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", n);
         net_send_all(client, size_line, (size_t)sl);
@@ -92,6 +149,7 @@ static void send_stream(Socket_Handle client, Http_Response *res, bool send_body
         net_send_all(client, "\r\n", 2);
     }
     net_send_all(client, "0\r\n\r\n", 5);
+    return sent;
 }
 
 static void send_error(Socket_Handle client, Http_Status status)
@@ -276,13 +334,16 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
         unsigned long long elapsed = time_mono_ms() - t0;
         res.keep_alive = keep;
         log_request(&req, &res, elapsed);
-        http_request_free(&req);
 
+        long long wire_bytes;
         if (res.stream_fn != NULL) {
-            send_stream(client, &res, !is_head);
+            wire_bytes = send_stream(client, &res, !is_head);
         } else {
             send_wire(client, &res);
+            wire_bytes = is_head ? 0 : (long long)res.body.count;
         }
+        log_access(&req, &res, wire_bytes);
+        http_request_free(&req);
         http_response_free(&res);
 
         rb_discard(&rb, consumed);

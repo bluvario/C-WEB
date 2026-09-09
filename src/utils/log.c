@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "log.h"
 
 #include <stdarg.h>
@@ -5,6 +7,7 @@
 
 static Log_Level g_level = LOG_INFO;
 static FILE *g_out = NULL; // NULL means stderr
+static FILE *g_clf = NULL; // NULL means no access log
 
 static const char *const g_level_names[] = {
     [LOG_DEBUG] = "DEBUG",
@@ -45,4 +48,27 @@ void log_log(Log_Level level, const char *fmt, ...)
     vfprintf(out, fmt, args);
     va_end(args);
     fprintf(out, "\n");
+}
+
+void log_set_clf(FILE *fh)
+{
+    g_clf = fh;
+}
+
+void log_clf_line(const char *data, size_t len)
+{
+    if (g_clf == NULL) {
+        return;
+    }
+#ifndef _WIN32
+    flockfile(g_clf);
+#endif
+    fwrite(data, 1, len, g_clf);
+    if (len == 0 || data[len - 1] != '\n') {
+        fputc('\n', g_clf);
+    }
+    fflush(g_clf);
+#ifndef _WIN32
+    funlockfile(g_clf);
+#endif
 }
