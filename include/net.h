@@ -17,6 +17,17 @@ Socket_Handle net_listen(int port);
 // the port a listening socket actually ended up bound to
 int net_bound_port(Socket_Handle listener);
 
+// binds the unix stream socket at path and starts listening. a leftover file
+// at path from an earlier run is removed first, so a crash never wedges a
+// restart. the created socket file must be deleted once the server exits,
+// otherwise nothing can rebind the path; net_unix_unlink() does that.
+// returns -1 on failure (and on OSes without unix sockets).
+Socket_Handle net_listen_unix(const char *path);
+// blocking connect to the unix socket at path; -1 on failure
+Socket_Handle net_connect_unix(const char *path);
+// removes the socket file a unix listener left behind; no-op on Windows
+void net_unix_unlink(const char *path);
+
 Socket_Handle net_accept(Socket_Handle listener);
 // blocking tcp connect to host:port ("127.0.0.1" style, no DNS yet)
 Socket_Handle net_connect(const char *host, int port);
@@ -37,6 +48,12 @@ long net_send_all(Socket_Handle sock, const void *buf, size_t len);
 int net_set_timeout(Socket_Handle sock, unsigned long ms);
 
 void net_close(Socket_Handle sock);
+
+// makes a blocked net_accept() on sock return. only one thread handles a
+// process-directed signal, so a peer accept loop may stay asleep otherwise;
+// shutdown() wakes it, where close() from another thread is not guaranteed to
+// on Linux. no-op on an already-partial fd.
+void net_shutdown(Socket_Handle sock);
 
 // human-readable reason for the last failed net_* call, for logging
 const char *net_error_string(void);

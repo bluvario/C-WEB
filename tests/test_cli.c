@@ -355,7 +355,7 @@ int main(void)
     if (f == NULL) {
         return 1;
     }
-    size_t cap = 16384, n = 0;
+    size_t cap = 32768, n = 0;
     char *main = malloc(cap);
     n = fread(main, 1, cap - 1, f);
     main[n] = '\0';
@@ -392,7 +392,7 @@ int main(void)
                     strstr(main, "Http_Security_Options sec_opts = {0};") != NULL &&
                     strstr(main, "Content-Security-Policy overrides from --csp") != NULL &&
                     strstr(main, "cweb_size_arg") != NULL &&
-                    strstr(main, "http_serve_config(listener, router_dispatch, &r, &cfg)") != NULL &&
+                    strstr(main, "http_serve_config(listener, cweb_dispatch, cweb_user, &cfg)") != NULL &&
                     strstr(main, "cfg.max_body = cweb_max_body;") != NULL &&
                     strstr(main, "log_set_clf(clf_file)") != NULL &&
                     strstr(main, "--db") != NULL &&

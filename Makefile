@@ -6,7 +6,7 @@ LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c 
 
 LIBS := -lz
 
-TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_gzip test_db test_notes test_cli test_login test_flash test_csrf test_validate test_hmac test_sign
+TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_gzip test_db test_notes test_unix test_cli test_login test_flash test_csrf test_validate test_hmac test_sign
 
 DEPS := $(shell find include src -name '*.h')
 

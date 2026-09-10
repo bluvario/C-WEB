@@ -20,6 +20,7 @@ typedef SOCKET raw_socket;
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 typedef int raw_socket;
 #define RAW_INVALID (-1)
@@ -125,6 +126,92 @@ int net_bound_port(Socket_Handle listener)
         return -1;
     }
     return ntohs(addr.sin_port);
+}
+
+#ifndef _WIN32
+// a bound sun_path cannot exceed the struct's buffer, so accept() to addrlen
+// stays whole; -1 when the path is too long
+static int fill_unix_addr(struct sockaddr_un *addr, const char *path)
+{
+    memset(addr, 0, sizeof *addr);
+    addr->sun_family = AF_UNIX;
+    size_t n = strlen(path);
+    if (n >= sizeof addr->sun_path) {
+        set_err("unix socket path too long");
+        return -1;
+    }
+    memcpy(addr->sun_path, path, n);
+    return 0;
+}
+#endif
+
+Socket_Handle net_listen_unix(const char *path)
+{
+#ifdef _WIN32
+    (void)path;
+    set_err("unix sockets are not supported on this platform");
+    return -1;
+#else
+    raw_socket fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (!raw_valid(fd)) {
+        set_err("socket() failed");
+        return -1;
+    }
+    struct sockaddr_un addr;
+    if (fill_unix_addr(&addr, path) != 0) {
+        raw_close(fd);
+        return -1;
+    }
+    // a crash or unclean exit leaves the file at path behind and bind would
+    // then refuse; clear it so a restart just works
+    unlink(path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        set_err("bind() failed");
+        raw_close(fd);
+        return -1;
+    }
+    if (listen(fd, 128) != 0) {
+        set_err("listen() failed");
+        raw_close(fd);
+        return -1;
+    }
+    return (Socket_Handle)fd;
+#endif
+}
+
+Socket_Handle net_connect_unix(const char *path)
+{
+#ifdef _WIN32
+    (void)path;
+    set_err("unix sockets are not supported on this platform");
+    return -1;
+#else
+    raw_socket fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (!raw_valid(fd)) {
+        set_err("socket() failed");
+        return -1;
+    }
+    struct sockaddr_un addr;
+    if (fill_unix_addr(&addr, path) != 0) {
+        raw_close(fd);
+        return -1;
+    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        set_err("connect() failed");
+        raw_close(fd);
+        return -1;
+    }
+    return (Socket_Handle)fd;
+#endif
+}
+
+void net_unix_unlink(const char *path)
+{
+#ifndef _WIN32
+    unlink(path);
+#else
+    (void)path;
+#endif
 }
 
 Socket_Handle net_accept(Socket_Handle listener)
@@ -274,6 +361,18 @@ void net_close(Socket_Handle sock)
         return;
     }
     raw_close((raw_socket)sock);
+}
+
+void net_shutdown(Socket_Handle sock)
+{
+    if (sock == -1) {
+        return;
+    }
+#ifdef _WIN32
+    shutdown((SOCKET)sock, SD_BOTH);
+#else
+    shutdown((int)sock, SHUT_RDWR);
+#endif
 }
 
 const char *net_error_string(void)
