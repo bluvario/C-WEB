@@ -44,15 +44,10 @@ static int random_bytes(unsigned char *buf, size_t n)
 #endif
 }
 
-const char *http_csrf_token(Http_Session *sesh)
+// generates a fresh token, stores it as the session's, and returns the stored
+// copy. http_session_set mirrors the write to a backing db if one is attached.
+static const char *store_new_token(Http_Session *sesh)
 {
-    if (sesh == NULL) {
-        return NULL;
-    }
-    const char *have = http_session_value(sesh, CSRF_KEY);
-    if (have != NULL && have[0] != '\0') {
-        return have;
-    }
     unsigned char rnd[TOKEN_BYTES];
     if (random_bytes(rnd, sizeof rnd) != 0) {
         return NULL;
@@ -63,6 +58,26 @@ const char *http_csrf_token(Http_Session *sesh)
     }
     http_session_set(sesh, CSRF_KEY, tok);
     return http_session_value(sesh, CSRF_KEY);
+}
+
+const char *http_csrf_token(Http_Session *sesh)
+{
+    if (sesh == NULL) {
+        return NULL;
+    }
+    const char *have = http_session_value(sesh, CSRF_KEY);
+    if (have != NULL && have[0] != '\0') {
+        return have;
+    }
+    return store_new_token(sesh);
+}
+
+const char *http_csrf_rotate(Http_Session *sesh)
+{
+    if (sesh == NULL) {
+        return NULL;
+    }
+    return store_new_token(sesh);
 }
 
 void http_csrf_field(Http_Response *res, Http_Session *sesh)

@@ -12,6 +12,11 @@
 // served to the same origin -- so a forged cross-site POST never carries the
 // right value and is refused with 403.
 //
+// rotate the token the moment authentication succeeds (http_csrf_rotate):
+// a token that was minted or fixed into the visitor's cookie before login
+// stops verifying the instant the login completes, so a fixation attempt
+// cannot ride an already-placed token into the authenticated session.
+//
 // a visitor with no session yet has no token to check against, so every call
 // is a safe no-op or a clean failure when sesh is NULL (and http_csrf_field()
 // simply emits nothing until the page creates a session and its cookie).
@@ -19,6 +24,13 @@
 // the session's token, generating one on first use. borrowed from the session
 // store, valid for the rest of the session; NULL when sesh is NULL.
 const char *http_csrf_token(Http_Session *sesh);
+
+// replaces the session's token with a fresh one and returns it; the old token
+// stops verifying immediately. the fresh token is stored like any other
+// session key, so on a db-backed store the rotation survives a crash. call it
+// right after authentication succeeds. NULL when sesh is NULL or the
+// generator's entropy source fails (call it unchanged next time).
+const char *http_csrf_rotate(Http_Session *sesh);
 
 // appends the standard form hidden input for the session's token:
 //   <input type="hidden" name="csrf_token" value="<token>">
