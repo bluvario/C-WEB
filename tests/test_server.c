@@ -73,7 +73,8 @@ static char *stall_partial(int port)
     if (s == -1) {
         return NULL;
     }
-    net_send_all(s, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n", 36);
+    const char *partial = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+    net_send_all(s, partial, strlen(partial));
     struct timespec ts = {.tv_sec = 0, .tv_nsec = 400000000};
     nanosleep(&ts, NULL);
     net_set_timeout(s, 2000);

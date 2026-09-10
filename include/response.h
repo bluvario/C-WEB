@@ -5,6 +5,7 @@
 
 #include "http.h"
 #include "json.h"
+#include "net.h"
 #include "strbuf.h"
 #include "sv.h"
 
@@ -13,6 +14,16 @@
 // headers have been sent; never touch the socket, the server frames the
 // chunks for you.
 typedef size_t (*Http_Stream_Fn)(void *buf, size_t cap, void *user_data);
+
+// raw protocol upgrade (e.g. WebSocket). when upgrade_fn is set the server
+// serializes whatever head this response carries (typically a 101 Switching
+// Protocols), then hands the raw connection and any bytes already buffered
+// past the request off to fn: no subsequent HTTP keep-alive requests are
+// served on it, and the socket is closed once fn returns. fn runs on the
+// connection's worker and owns the socket for the duration, so it may block
+// freely in net_recv/net_send_all.
+typedef void (*Http_Upgrade_Fn)(Socket_Handle client, String_View leftover,
+                                void *user_data);
 
 // a single queued chunk for push-based streaming
 typedef struct {
@@ -38,6 +49,12 @@ typedef struct {
     Http_Stream_Chunk *stream_chunks;
     size_t stream_chunk_count;
     size_t stream_chunk_cap;
+    // raw upgrade hook: when set, the server sends this head (a 101) and then
+    // calls fn with the raw socket and leftover buffered bytes (WebSocket
+    // handoff). mutually exclusive with streaming bodies in practice; the
+    // head serialization carries no body either way.
+    Http_Upgrade_Fn upgrade_fn;
+    void *upgrade_user;
 } Http_Response;
 
 void http_response_init(Http_Response *res);

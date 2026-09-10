@@ -21,6 +21,8 @@ void http_response_init(Http_Response *res)
     res->stream_chunks = NULL;
     res->stream_chunk_count = 0;
     res->stream_chunk_cap = 0;
+    res->upgrade_fn = NULL;
+    res->upgrade_user = NULL;
     strbuf_init(&res->headers);
     strbuf_init(&res->body);
 }
@@ -337,8 +339,13 @@ static bool has_header(Http_Response *res, const char *name)
 // server writes individual chunks afterwards.
 void http_response_serialize_head(Http_Response *res, Strbuf *out)
 {
-    // responses in these statuses carry no body per RFC 9110
-    bool status_has_no_body = res->status == HTTP_204_NO_CONTENT || res->status == HTTP_304_NOT_MODIFIED;
+    // responses in these statuses carry no body per RFC 9110; 1xx codes
+    // (101 switching protocols) additionally must not be framed with a default
+    // Connection header, since the handler supplies Connection: Upgrade
+    bool status_has_no_body = res->status < 200 ||
+                              res->status == HTTP_204_NO_CONTENT ||
+                              res->status == HTTP_304_NOT_MODIFIED;
+    bool informational = res->status >= 100 && res->status < 200;
 
     char line[128];
     snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\n",
@@ -363,12 +370,18 @@ void http_response_serialize_head(Http_Response *res, Strbuf *out)
 
     // RFC 9110: an origin server must date-stamp basic responses so clients
     // and caches can judge freshness; a handler's own Date header wins
-    if (!has_header(res, "date")) {
+    if (!informational && !has_header(res, "date")) {
         char d[64];
         http_date_rfc7231(time(NULL), d, sizeof(d));
         strbuf_append_cstr(out, "Date: ");
         strbuf_append_cstr(out, d);
         strbuf_append_cstr(out, "\r\n");
+    }
+    if (informational) {
+        // the upgrade handshake brings its own Connection: Upgrade; a default
+        // keep-alive/close line here would contradict it
+        strbuf_append_cstr(out, "\r\n");
+        return;
     }
     strbuf_append_cstr(out, res->keep_alive ? "Connection: keep-alive\r\n"
                                              : "Connection: close\r\n");
@@ -385,7 +398,9 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
     }
     // responses in these statuses carry no body per RFC 9110 (head already
     // omitted their Content-Length)
-    bool status_has_no_body = res->status == HTTP_204_NO_CONTENT || res->status == HTTP_304_NOT_MODIFIED;
+    bool status_has_no_body = res->status < 200 ||
+                              res->status == HTTP_204_NO_CONTENT ||
+                              res->status == HTTP_304_NOT_MODIFIED;
     if (!status_has_no_body && !res->suppress_body) {
         strbuf_append(out, res->body.items, res->body.count);
     }

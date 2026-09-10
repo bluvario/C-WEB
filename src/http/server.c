@@ -167,6 +167,24 @@ static long long send_stream(Socket_Handle client, Http_Response *res, bool send
     return sent;
 }
 
+// hands the connection over to a raw protocol handler after the response head
+// is out: anything the client pipelined past the request (e.g. the first
+// WebSocket frame) is dangling in the read buffer, so it moves to the handoff
+// as leftover bytes the protocol layer must consume before reading fresh ones.
+// the connection carries only this one request: no keep-alive after an upgrade.
+static void handle_upgrade(Socket_Handle client, Http_Response *res,
+                           Read_Buffer *rb, size_t consumed)
+{
+    send_wire(client, res);
+    String_View buffered = rb_view(rb);
+    String_View leftover;
+    leftover.data = buffered.data + consumed;
+    leftover.count = buffered.count - consumed;
+    if (res->upgrade_fn != NULL) {
+        res->upgrade_fn(client, leftover, res->upgrade_user);
+    }
+}
+
 static void send_error(Socket_Handle client, Http_Status status)
 {
     Http_Response res;
@@ -362,6 +380,17 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         unsigned long long elapsed = time_mono_ms() - t0;
         res.keep_alive = keep;
         log_request(&req, &res, elapsed);
+
+        // a raw upgrade (WebSocket etc.): send the 101 head, hand the socket
+        // and leftover buffered bytes to the app, then close when it returns.
+        // this connection serves no further HTTP requests after the handoff.
+        if (res.upgrade_fn != NULL) {
+            handle_upgrade(client, &res, &rb, consumed);
+            http_request_free(&req);
+            http_response_free(&res);
+            rb_free(&rb);
+            return;
+        }
 
         long long wire_bytes;
         if (res.stream_fn != NULL || res.stream_chunk_count > 0) {
