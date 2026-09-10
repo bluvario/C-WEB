@@ -315,6 +315,7 @@ void http_session_issue_cookie(Http_Response *res, const char *cookie_name,
     } else {
         a.path = "/";
         a.http_only = true;
+        a.same_site = COOKIE_SAMESITE_LAX;
         a.max_age = -1; // negative omits Max-Age: a browser-lifetime cookie
     }
     http_response_set_cookie(res, cookie_name, token, &a);

@@ -49,8 +49,10 @@ int main(void)
     http_response_init(&res);
 
     http_response_set_cookie(&res, "sid", "abc123", NULL);
-    Cookie_Attrs attrs = {"admin", 3600, true, true};
+    Cookie_Attrs attrs = {"admin", 3600, true, true, COOKIE_SAMESITE_LAX};
     http_response_set_cookie(&res, "theme", "dark", &attrs);
+    Cookie_Attrs strict = {"/", -1, true, true, COOKIE_SAMESITE_STRICT};
+    http_response_set_cookie(&res, "lock", "me", &strict);
 
     Strbuf wire;
     strbuf_init(&wire);
@@ -58,9 +60,28 @@ int main(void)
     strbuf_null_terminate(&wire);
     const char *expect =
         "Set-Cookie: sid=abc123\r\n"
-        "Set-Cookie: theme=dark; Path=admin; Max-Age=3600; HttpOnly; Secure\r\n";
+        "Set-Cookie: theme=dark; Path=admin; Max-Age=3600; HttpOnly; Secure; SameSite=Lax\r\n"
+        "Set-Cookie: lock=me; Path=/; HttpOnly; Secure; SameSite=Strict\r\n";
     if (strstr(wire.items, expect) == NULL) {
         fprintf(stderr, "Set-Cookie wire wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+
+    // SameSite=None without Secure still emits Secure: browsers refuse it
+    // otherwise, so the flag is forced on
+    http_response_init(&res);
+    Cookie_Attrs none = {0};
+    none.max_age = -1;
+    none.same_site = COOKIE_SAMESITE_NONE;
+    http_response_set_cookie(&res, "track", "me", &none);
+    http_response_set_header(&res, "other", "x");
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Set-Cookie: track=me; Secure; SameSite=None\r\n") == NULL) {
+        fprintf(stderr, "SameSite=None wire wrong:\n%s\n", wire.items);
         return 1;
     }
     strbuf_free(&wire);

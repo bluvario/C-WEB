@@ -95,8 +95,9 @@ Http_Session *http_session_from_cookie(Http_Session_Store *s, Http_Request *req,
 
 // the mirror write: appends a Set-Cookie carrying the session token. when
 // attrs is NULL the cookie is a browser-lifetime session cookie scoped to
-// "/" and marked HttpOnly; pass your own attrs to customize (Path, Max-Age,
-// Secure...).
+// "/", marked HttpOnly and SameSite=Lax; pass your own attrs to customize
+// (Path, Max-Age, Secure, SameSite=Strict or None...). production hosts
+// should also pass Secure so the token never leaves over plain HTTP.
 void http_session_issue_cookie(Http_Response *res, const char *cookie_name,
                                const char *token, const Cookie_Attrs *attrs);
 

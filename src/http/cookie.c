@@ -28,8 +28,24 @@ void http_response_set_cookie(Http_Response *res, const char *name, const char *
         if (attrs->http_only) {
             strbuf_append_cstr(&h, "; HttpOnly");
         }
-        if (attrs->secure) {
+        // SameSite=None is refused by browsers without Secure, so one cannot
+        // ask for it without taking the other
+        bool secure = attrs->secure || attrs->same_site == COOKIE_SAMESITE_NONE;
+        if (secure) {
             strbuf_append_cstr(&h, "; Secure");
+        }
+        switch (attrs->same_site) {
+        case COOKIE_SAMESITE_NONE:
+            strbuf_append_cstr(&h, "; SameSite=None");
+            break;
+        case COOKIE_SAMESITE_LAX:
+            strbuf_append_cstr(&h, "; SameSite=Lax");
+            break;
+        case COOKIE_SAMESITE_STRICT:
+            strbuf_append_cstr(&h, "; SameSite=Strict");
+            break;
+        case COOKIE_SAMESITE_DEFAULT:
+            break;
         }
     }
 

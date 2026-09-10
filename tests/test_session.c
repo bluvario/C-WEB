@@ -263,8 +263,9 @@ int main(void)
         Http_Response res;
         http_response_init(&res);
         http_session_issue_cookie(&res, "sid", "abc123", NULL);
-        fails += check("default cookie is HttpOnly under /",
-            strstr(res.headers.items, "Set-Cookie: sid=abc123; Path=/; HttpOnly\r\n") != NULL);
+        fails += check("default cookie is HttpOnly, SameSite=Lax under /",
+            strstr(res.headers.items,
+                   "Set-Cookie: sid=abc123; Path=/; HttpOnly; SameSite=Lax\r\n") != NULL);
 
         http_response_free(&res);
         http_response_init(&res);

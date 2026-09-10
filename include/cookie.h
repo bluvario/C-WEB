@@ -9,15 +9,25 @@
 
 // attributes that may ride along on a Set-Cookie: NULL/negative/bool field
 // just omits that attribute from the wire
+typedef enum {
+    COOKIE_SAMESITE_DEFAULT = 0, // omit the attribute; browsers then pick (Lax)
+    COOKIE_SAMESITE_NONE,        // "; SameSite=None", implies Secure
+    COOKIE_SAMESITE_LAX,         // "; SameSite=Lax"
+    COOKIE_SAMESITE_STRICT,      // "; SameSite=Strict"
+} Cookie_SameSite;
+
 typedef struct {
     const char *path;      // "Path=..." when set
     int max_age;           // "Max-Age=N" when >= 0
     bool http_only;        // HttpOnly flag
-    bool secure;           // Secure flag
+    bool secure;           // Secure flag (forced on for SameSite=None)
+    Cookie_SameSite same_site; // SameSite=... when not DEFAULT
 } Cookie_Attrs;
 
 // appends a Set-Cookie header. name and value are emitted verbatim, the
-// caller is responsible for any percent- or character escaping.
+// caller is responsible for any percent- or character escaping. SameSite=None
+// is only honored by browsers alongside Secure, so that combination turns the
+// Secure flag on even when attrs->secure is false.
 void http_response_set_cookie(Http_Response *res, const char *name, const char *value,
                               const Cookie_Attrs *attrs);
 
