@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "base64.h"
 #include "request.h"
 #include "response.h"
 #include "rate_limit.h"
+#include "strbuf.h"
 #include "sv.h"
 
 static int check(const char *what, int cond)
@@ -227,6 +229,143 @@ int main(void)
         fails += check("bob is a separate bucket",
             http_rate_limiter_allow(&rl, sv_from_cstr("bob")) == 0);
         http_request_free(&req);
+        http_rate_limiter_free(&rl);
+    }
+
+    // http_rate_limit_user_key: an already-verified req->auth_user owns the
+    // bucket (one account, however many addresses)
+    {
+        Http_RateLimiter rl;
+        http_rate_limiter_init(&rl, 1.0, 2.0);
+        fake_now = 0;
+        rl.clock_ms = fake_clock;
+        rl.key_fn = http_rate_limit_user_key;
+
+        String_View u = sv_from_cstr("alice");
+        fails += check("alice has a full bucket",
+            http_rate_limiter_allow(&rl, u) == 0 &&
+            http_rate_limiter_allow(&rl, u) == 0);
+        fails += check("alice's budget is spent",
+            http_rate_limiter_allow(&rl, u) == -1);
+
+        String_View other = sv_from_cstr("bob");
+        fails += check("bob is a separate bucket",
+            http_rate_limiter_allow(&rl, other) == 0);
+        http_rate_limiter_free(&rl);
+    }
+
+    // http_rate_limit_user_key: a claiming Basic header throttles the account
+    // *before* the password is verified, so a wrong-password guess burns the
+    // account's bucket even from a fresh caller address
+    {
+        Http_RateLimiter rl;
+        http_rate_limiter_init(&rl, 1.0, 2.0);
+        fake_now = 0;
+        rl.clock_ms = fake_clock;
+        rl.key_fn = http_rate_limit_user_key;
+
+        // the wire credentials "alice:guess" (the password does not matter
+        // here; the header alone names the account)
+        char auth[128];
+        {
+            Strbuf s;
+            strbuf_init(&s);
+            base64_encode_into(&s, sv_from_cstr("alice:guess"));
+            size_t n = s.count < sizeof auth - 1 ? s.count : sizeof auth - 1;
+            memcpy(auth, s.items, n);
+            auth[n] = '\0';
+            strbuf_free(&s);
+        }
+        char alice_raw[512];
+        snprintf(alice_raw, sizeof alice_raw,
+                 "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic %s\r\n\r\n",
+                 auth);
+
+        Http_Request req;
+        fails += check("parse alice request",
+            http_request_parse(&req, sv_from_cstr(alice_raw)) == REQ_OK);
+        req.remote = sv_from_cstr("10.0.0.1");
+
+        String_View k = http_rate_limit_user_key(&req, NULL);
+        fails += check("key is the claimed username, not the IP",
+            sv_equal(k, sv_from_cstr("alice")));
+        fails += check("guess 1 draws from the account bucket",
+            http_rate_limiter_allow(&rl, k) == 0);
+        fails += check("guess 2 draws from the account bucket",
+            http_rate_limiter_allow(&rl, k) == 0);
+        fails += check("guess 3 is throttled",
+            http_rate_limiter_allow(&rl, k) == -1);
+
+        // the same account from a different address still shares that bucket
+        {
+            Http_Request q;
+            fails += check("parse alice request again",
+                http_request_parse(&q, sv_from_cstr(alice_raw)) == REQ_OK);
+            q.remote = sv_from_cstr("10.0.0.99");
+            String_View k2 = http_rate_limit_user_key(&q, NULL);
+            fails += check("key is still the account", sv_equal(k2, k));
+            fails += check("fresh IP does not reroll alice's bucket",
+                http_rate_limiter_allow(&rl, k2) == -1);
+            http_request_free(&q);
+        }
+
+        // a different account's bucket stays full even on the same machine
+        {
+            char bob_raw[512];
+            char bobby[128];
+            Strbuf s;
+            strbuf_init(&s);
+            base64_encode_into(&s, sv_from_cstr("bob:guess"));
+            size_t n = s.count < sizeof bobby - 1 ? s.count : sizeof bobby - 1;
+            memcpy(bobby, s.items, n);
+            bobby[n] = '\0';
+            strbuf_free(&s);
+            snprintf(bob_raw, sizeof bob_raw,
+                     "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic %s\r\n\r\n",
+                     bobby);
+
+            Http_Request q;
+            fails += check("parse bob request",
+                http_request_parse(&q, sv_from_cstr(bob_raw)) == REQ_OK);
+            q.remote = sv_from_cstr("10.0.0.1");
+            String_View k3 = http_rate_limit_user_key(&q, NULL);
+            fails += check("bob claims his own bucket",
+                sv_equal(k3, sv_from_cstr("bob")));
+            fails += check("bob is allowed while alice is dry",
+                http_rate_limiter_allow(&rl, k3) == 0);
+            http_request_free(&q);
+        }
+
+        http_request_free(&req);
+        http_rate_limiter_free(&rl);
+    }
+
+    // anonymous requests without credentials fall back to the caller address
+    {
+        Http_RateLimiter rl;
+        http_rate_limiter_init(&rl, 1.0, 1.0);
+        fake_now = 0;
+        rl.clock_ms = fake_clock;
+        rl.key_fn = http_rate_limit_user_key;
+
+        Http_Request a, b;
+        fails += check("parse anon request a",
+            http_request_parse(&a, sv_from_cstr(
+                "GET / HTTP/1.1\r\nHost: x\r\n\r\n")) == REQ_OK);
+        fails += check("parse anon request b",
+            http_request_parse(&b, sv_from_cstr(
+                "GET / HTTP/1.1\r\nHost: x\r\n\r\n")) == REQ_OK);
+        a.remote = sv_from_cstr("10.1.1.1");
+        b.remote = sv_from_cstr("10.1.1.2");
+        fails += check("anon key is the caller address",
+            sv_equal(http_rate_limit_user_key(&a, NULL),
+                     sv_from_cstr("10.1.1.1")));
+        fails += check("anon request a allowed",
+            http_rate_limiter_allow(&rl, http_rate_limit_user_key(&a, NULL)) == 0);
+        fails += check("anon request b has its own bucket",
+            http_rate_limiter_allow(&rl, http_rate_limit_user_key(&b, NULL)) == 0);
+        http_request_free(&a);
+        http_request_free(&b);
         http_rate_limiter_free(&rl);
     }
 

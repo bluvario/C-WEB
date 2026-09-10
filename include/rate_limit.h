@@ -38,6 +38,26 @@ typedef struct {
     int reset;      // seconds until the bucket refills to full
 } Http_RateLimit_Status;
 
+// built-in identity-aware key, useful when some requests carry credentials:
+//
+//   1. req->auth_user (a verified identity already recorded by an outer
+//      middleware such as http_basic_auth_middleware) owns the bucket, so
+//      every request from a logged-in account draws from one budget no matter
+//      which address it arrives from;
+//   2. otherwise a "Basic" Authorization header's *claimed* username owns the
+//      bucket even before the password is verified, which throttles guessing
+//      one account across every caller IP instead of letting a fresh address
+//      reroll the budget on each attempt;
+//   3. otherwise the caller's req->remote address.
+//
+// step 2 only needs the header, so it also throttles failed logins: put this
+// key function on a limiter that runs *outside* the auth guard and a
+// brute-forcer burns the account's bucket on every wrong try. as with any
+// key_fn the returned view only has to stay valid until the middleware's
+// allow()/status() calls return, which it does here (step 2 decodes into
+// thread-local scratch storage).
+String_View http_rate_limit_user_key(Http_Request *req, void *user_data);
+
 void http_rate_limiter_init(Http_RateLimiter *rl, double rate, double burst);
 void http_rate_limiter_free(Http_RateLimiter *rl);
 // drops every bucket so a drained limiter starts over

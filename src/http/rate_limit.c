@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "base64.h"
 #include "date.h"
+#include "strbuf.h"
 #include "xmem.h"
 
 void http_rate_limiter_init(Http_RateLimiter *rl, double rate, double burst)
@@ -122,6 +124,56 @@ int http_rate_limiter_allow(Http_RateLimiter *rl, String_View key)
         return 0;
     }
     return -1;
+}
+
+// shared decode scratch for the claimed-username step below: the view it vends
+// only has to outlive the middleware's immediate allow()/status() calls, so a
+// per-thread buffer (like template.c's capture buffers) is safe to reuse
+static _Thread_local Strbuf key_buf;
+
+String_View http_rate_limit_user_key(Http_Request *req, void *user_data)
+{
+    (void)user_data;
+
+    // a verified identity recorded by an outer middleware owns the budget:
+    // one account = one bucket, wherever its requests come from
+    if (req->auth_user.count > 0) {
+        return req->auth_user;
+    }
+
+    // credentials still being checked? the claimed username throttles the
+    // account before the password is verified, so a fresh caller IP cannot
+    // reroll a bucket on each guess and brute-forcing one account is limited
+    // no matter how many addresses the attacker spreads across
+    const String_View *auth = http_request_get_header(req, "authorization");
+    if (auth != NULL && auth->count >= 6 && auth->data[5] == ' ' &&
+        (auth->data[0] == 'b' || auth->data[0] == 'B') &&
+        (auth->data[1] == 'a' || auth->data[1] == 'A') &&
+        (auth->data[2] == 's' || auth->data[2] == 'S') &&
+        (auth->data[3] == 'i' || auth->data[3] == 'I') &&
+        (auth->data[4] == 'c' || auth->data[4] == 'C')) {
+        String_View payload = {auth->data + 6, auth->count - 6};
+        if (key_buf.items == NULL) {
+            strbuf_init(&key_buf);
+        }
+        key_buf.count = 0;
+        if (base64_decode_into(&key_buf, payload) == 0) {
+            // the username is everything before the first ':'; an empty user
+            // or a missing colon yields no identity, so fall through to the
+            // caller's address below
+            for (size_t i = 0; i < key_buf.count; i++) {
+                if (key_buf.items[i] == ':') {
+                    if (i > 0) {
+                        return (String_View){key_buf.items, i};
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // nobody claimed an identity: bill the calling address
+    return req->remote;
 }
 
 void http_rate_limit_middleware(Http_Request *req, Http_Response *res,
