@@ -14,6 +14,12 @@
 // chunks for you.
 typedef size_t (*Http_Stream_Fn)(void *buf, size_t cap, void *user_data);
 
+// a single queued chunk for push-based streaming
+typedef struct {
+    char *data;  // owned
+    size_t len;
+} Http_Stream_Chunk;
+
 // in-memory response, assembled piece by piece then serialized. header and
 // body buffers are owned, free the response when done with it.
 typedef struct {
@@ -25,6 +31,13 @@ typedef struct {
     bool no_layout;  // when set the generated layout wrapper skips framing
     Http_Stream_Fn stream_fn; // when set the body is chunked and streamed
     void *stream_user;
+    // push-based chunks: the handler queues data via http_response_stream_write;
+    // the server drains them in chunked framing after the handler returns.
+    // stream_fn and stream_chunks are mutually exclusive for the callback model
+    // but can coexist (queue drains first, then callback feeds the rest).
+    Http_Stream_Chunk *stream_chunks;
+    size_t stream_chunk_count;
+    size_t stream_chunk_cap;
 } Http_Response;
 
 void http_response_init(Http_Response *res);
@@ -56,6 +69,15 @@ void http_response_add_body_cstr(Http_Response *res, const char *text);
 // of body bytes. any buffered body is dropped: a response is either streamed
 // or assembled, not both.
 void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_data);
+
+// push-based streaming: queue a chunk of body bytes. the server drains the
+// queue in chunked framing after the handler returns. each chunk is copied;
+// the caller retains ownership of the original data. calling this at least
+// once switches the response to chunked mode (Transfer-Encoding: chunked)
+// even when no stream_fn is set.
+void http_response_stream_write(Http_Response *res, const void *data, size_t len);
+void http_response_stream_write_cstr(Http_Response *res, const char *str);
+void http_response_stream_write_sv(Http_Response *res, String_View data);
 
 // turns the response into a redirect: sets Location and the given status,
 // with no body (the client follows Location anyway). a plain-text

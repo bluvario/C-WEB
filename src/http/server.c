@@ -120,11 +120,12 @@ static void send_wire(Socket_Handle client, Http_Response *res)
 }
 
 // streams the response body in chunked framing: the head is serialized like
-// any other response (with Transfer-Encoding: chunked), then the callback is
-// drained into wire-sized frames until it reports the stream over. a raw
-// "0\r\n\r\n" balance frame closes it. for HEAD the metadata is delivered but
-// the chunked body is not, mirroring what a GET with a body would send.
-// returns the number of streamed entity bytes (0 for HEAD).
+// any other response (with Transfer-Encoding: chunked), then pushed chunks
+// are drained and the callback is fed into wire-sized frames until it reports
+// the stream over. a raw "0\r\n\r\n" balance frame closes it. for HEAD the
+// metadata is delivered but the chunked body is not, mirroring what a GET
+// with a body would send. returns the number of streamed entity bytes (0 for
+// HEAD).
 static long long send_stream(Socket_Handle client, Http_Response *res, bool send_body)
 {
     send_wire(client, res); // head only: serialize skips the stream body
@@ -132,21 +133,35 @@ static long long send_stream(Socket_Handle client, Http_Response *res, bool send
         return 0;
     }
     long long sent = 0;
-    char chunk[8192];
-    for (;;) {
-        size_t n = res->stream_fn(chunk, sizeof(chunk), res->stream_user);
-        if (n == 0) {
-            break;
+    for (size_t i = 0; i < res->stream_chunk_count; i++) {
+        Http_Stream_Chunk *c = &res->stream_chunks[i];
+        if (c->len == 0) {
+            continue;
         }
-        if (n > sizeof(chunk)) {
-            break; // corrupt producer, stop rather than buffer forever
-        }
-        sent += (long long)n;
+        sent += (long long)c->len;
         char size_line[32];
-        int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", n);
+        int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", c->len);
         net_send_all(client, size_line, (size_t)sl);
-        net_send_all(client, chunk, n);
+        net_send_all(client, c->data, c->len);
         net_send_all(client, "\r\n", 2);
+    }
+    if (res->stream_fn != NULL) {
+        char chunk[8192];
+        for (;;) {
+            size_t n = res->stream_fn(chunk, sizeof(chunk), res->stream_user);
+            if (n == 0) {
+                break;
+            }
+            if (n > sizeof(chunk)) {
+                break; // corrupt producer, stop rather than buffer forever
+            }
+            sent += (long long)n;
+            char size_line[32];
+            int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", n);
+            net_send_all(client, size_line, (size_t)sl);
+            net_send_all(client, chunk, n);
+            net_send_all(client, "\r\n", 2);
+        }
     }
     net_send_all(client, "0\r\n\r\n", 5);
     return sent;
@@ -349,7 +364,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         log_request(&req, &res, elapsed);
 
         long long wire_bytes;
-        if (res.stream_fn != NULL) {
+        if (res.stream_fn != NULL || res.stream_chunk_count > 0) {
             wire_bytes = send_stream(client, &res, !is_head);
         } else {
             send_wire(client, &res);

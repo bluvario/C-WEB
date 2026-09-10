@@ -18,12 +18,19 @@ void http_response_init(Http_Response *res)
     res->no_layout = false;
     res->stream_fn = NULL;
     res->stream_user = NULL;
+    res->stream_chunks = NULL;
+    res->stream_chunk_count = 0;
+    res->stream_chunk_cap = 0;
     strbuf_init(&res->headers);
     strbuf_init(&res->body);
 }
 
 void http_response_free(Http_Response *res)
 {
+    for (size_t i = 0; i < res->stream_chunk_count; i++) {
+        xfree(res->stream_chunks[i].data);
+    }
+    xfree(res->stream_chunks);
     strbuf_free(&res->headers);
     strbuf_free(&res->body);
 }
@@ -106,6 +113,40 @@ void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_
     strbuf_free(&res->body);
     strbuf_init(&res->body);
     res->suppress_body = false;
+}
+
+void http_response_stream_write(Http_Response *res, const void *data, size_t len)
+{
+    if (res->stream_fn == NULL && res->stream_chunk_count == 0) {
+        // first streamed write: drop any assembled body and switch the
+        // response to chunked mode
+        strbuf_free(&res->body);
+        strbuf_init(&res->body);
+        res->suppress_body = false;
+    }
+    if (res->stream_chunk_count == res->stream_chunk_cap) {
+        size_t nc = res->stream_chunk_cap ? res->stream_chunk_cap * 2 : 8;
+        res->stream_chunks = xrealloc(res->stream_chunks,
+                                      nc * sizeof(*res->stream_chunks));
+        res->stream_chunk_cap = nc;
+    }
+    Http_Stream_Chunk *c = &res->stream_chunks[res->stream_chunk_count];
+    c->data = xmalloc(len > 0 ? len : 1);
+    if (len > 0) {
+        memcpy(c->data, data, len);
+    }
+    c->len = len;
+    res->stream_chunk_count++;
+}
+
+void http_response_stream_write_cstr(Http_Response *res, const char *str)
+{
+    http_response_stream_write(res, str, strlen(str));
+}
+
+void http_response_stream_write_sv(Http_Response *res, String_View data)
+{
+    http_response_stream_write(res, data.data, data.count);
 }
 
 // header text is "Name: value\r\n" lines; true when name (any case) already
@@ -306,7 +347,7 @@ void http_response_serialize_head(Http_Response *res, Strbuf *out)
 
     strbuf_append(out, res->headers.items, res->headers.count);
 
-    bool streaming = res->stream_fn != NULL;
+    bool streaming = res->stream_fn != NULL || res->stream_chunk_count > 0;
     if (!status_has_no_body) {
         if (streaming) {
             strbuf_append_cstr(out, "Transfer-Encoding: chunked\r\n");
@@ -339,7 +380,7 @@ void http_response_serialize(Http_Response *res, Strbuf *out)
     http_response_serialize_head(res, out);
     // streamed responses keep their body out of the buffer; the server writes
     // it chunk by chunk straight to the socket
-    if (res->stream_fn != NULL) {
+    if (res->stream_fn != NULL || res->stream_chunk_count > 0) {
         return;
     }
     // responses in these statuses carry no body per RFC 9110 (head already
