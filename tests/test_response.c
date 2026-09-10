@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "json.h"
 #include "response.h"
 #include "strbuf.h"
 #include "sv.h"
@@ -166,6 +167,99 @@ int main(void)
     }
     fails += check("preflight headers present", 1);
     http_response_free(&res);
+
+    // header replace: swaps an existing header in place, various cases
+    http_response_init(&res);
+    http_response_set_header(&res, "Content-Type", "text/html; charset=utf-8");
+    http_response_set_header(&res, "X-Test", "one");
+    http_response_set_header_replace(&res, "Content-Type", "application/json");
+    fails += check("replace swaps an existing header",
+                   strstr(res.headers.items, "Content-Type: application/json\r\n") != NULL &&
+                   strstr(res.headers.items, "text/html") == NULL);
+    fails += check("replace keeps sibling headers",
+                   strstr(res.headers.items, "X-Test: one\r\n") != NULL);
+    http_response_set_header_replace(&res, "X-Missing", "added");
+    fails += check("replace appends an absent header",
+                   strstr(res.headers.items, "X-Missing: added\r\n") != NULL);
+    http_response_set_header(&res, "X-Test", "two");
+    http_response_set_header(&res, "X-Test", "three");
+    http_response_set_header_replace(&res, "X-Test", "final");
+    size_t test_headers = 0;
+    for (size_t i = 0; i + 7 < res.headers.count; i++) {
+        if (strncmp(res.headers.items + i, "X-Test:", 7) == 0) {
+            test_headers++;
+        }
+    }
+    fails += check("replace collapses duplicates to one", test_headers == 1);
+    fails += check("replace's one header carries the last value",
+                   strstr(res.headers.items, "X-Test: final\r\n") != NULL);
+    http_response_free(&res);
+
+    // no_layout starts false and is not serialized to the wire
+    http_response_init(&res);
+    fails += check("no_layout defaults to false", res.no_layout == false);
+    res.no_layout = true;
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    fails += check("no_layout does not leak onto the wire",
+                   strstr(wire.items, "no_layout") == NULL);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
+    // JSON helper: 200 with a compact object; the template's text/html
+    // default must be replaced, not stacked
+    http_response_init(&res);
+    http_response_set_header(&res, "Content-Type", "text/html; charset=utf-8");
+    Json_Value obj = json_make_object();
+    json_object_set(&obj, "hello", json_make_string("world"));
+    http_response_json(&res, HTTP_200_OK, obj);
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    if (strncmp(wire.items, "HTTP/1.1 200 OK\r\n", 17) != 0 ||
+        strstr(wire.items, "Content-Type: application/json; charset=utf-8\r\n") == NULL ||
+        strstr(wire.items, "text/html") != NULL ||
+        strstr(wire.items, "\"hello\":\"world\"") == NULL ||
+        strstr(wire.items, "Date:") == NULL) {
+        fprintf(stderr, "JSON 200 wire wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("JSON 200 wire format", 1);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
+    // JSON helper: raw string body
+    http_response_init(&res);
+    http_response_json_raw(&res, HTTP_201_CREATED, "{\"ok\":true}");
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    if (strncmp(wire.items, "HTTP/1.1 201 Created\r\n", 22) != 0 ||
+        strstr(wire.items, "Content-Type: application/json; charset=utf-8\r\n") == NULL ||
+        strstr(wire.items, "{\"ok\":true}") == NULL) {
+        fprintf(stderr, "JSON raw 201 wire wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("JSON raw 201 wire format", 1);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
+    // JSON helper: 204 still sets Content-Type but omits body and Content-Length
+    http_response_init(&res);
+    http_response_json(&res, HTTP_204_NO_CONTENT, json_make_object());
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    if (strstr(wire.items, "Content-Type: application/json; charset=utf-8\r\n") == NULL ||
+        strstr(wire.items, "Content-Length:") != NULL ||
+        strstr(wire.items, "\r\n\r\n") == NULL) {
+        fprintf(stderr, "JSON 204 wire wrong:\n%s\n", wire.items);
+        return 1;
+    }
+    fails += check("JSON 204 wire format", 1);
+    http_response_free(&res);
+    strbuf_free(&wire);
 
     if (fails == 0) {
         printf("response ok\n");

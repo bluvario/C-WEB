@@ -15,6 +15,7 @@ void http_response_init(Http_Response *res)
     res->status = HTTP_200_OK;
     res->suppress_body = false;
     res->keep_alive = false;
+    res->no_layout = false;
     res->stream_fn = NULL;
     res->stream_user = NULL;
     strbuf_init(&res->headers);
@@ -38,6 +39,54 @@ void http_response_set_header(Http_Response *res, const char *name, const char *
     strbuf_append_cstr(&res->headers, ": ");
     strbuf_append_cstr(&res->headers, value);
     strbuf_append_cstr(&res->headers, "\r\n");
+}
+
+void http_response_set_header_replace(Http_Response *res, const char *name, const char *value)
+{
+    size_t nn = strlen(name);
+    Strbuf out;
+    strbuf_init(&out);
+
+    // copy every line that does not start with "name:" (any case); the
+    // replacement is appended after them all, so later headers move up
+    size_t at = 0;
+    while (at < res->headers.count) {
+        size_t line_end = at;
+        while (line_end < res->headers.count &&
+               res->headers.items[line_end] != '\n') {
+            line_end++;
+        }
+        size_t line_len = line_end - at;
+        bool match = line_len >= nn &&
+                     res->headers.items[at + nn] == ':';
+        if (match) {
+            for (size_t i = 0; i < nn; i++) {
+                if (tolower((unsigned char)res->headers.items[at + i]) !=
+                    tolower((unsigned char)name[i])) {
+                    match = false;
+                    break;
+                }
+            }
+        }
+        if (!match) {
+            strbuf_append(&out, res->headers.items + at, line_len);
+            if (line_end < res->headers.count) {
+                strbuf_append_char(&out, '\n');
+            }
+        }
+        at = line_end < res->headers.count ? line_end + 1 : res->headers.count;
+    }
+
+    strbuf_append_cstr(&out, name);
+    strbuf_append_cstr(&out, ": ");
+    strbuf_append_cstr(&out, value);
+    strbuf_append_cstr(&out, "\r\n");
+    // like the rest of the header text, the result is kept NUL-terminated so
+    // callers can strstr it safely
+    strbuf_null_terminate(&out);
+
+    strbuf_free(&res->headers);
+    res->headers = out;
 }
 
 void http_response_add_body(Http_Response *res, String_View data)
@@ -167,6 +216,27 @@ void http_response_redirect(Http_Response *res, Http_Status status, const char *
     if (!response_has_header(res, "Content-Type")) {
         http_response_set_header(res, "Content-Type", "text/plain; charset=utf-8");
     }
+}
+
+void http_response_json(Http_Response *res, Http_Status status, Json_Value value)
+{
+    http_response_set_status(res, status);
+    http_response_set_header_replace(res, "Content-Type", "application/json; charset=utf-8");
+    Strbuf buf;
+    strbuf_init(&buf);
+    json_serialize(&value, &buf);
+    if (strbuf_null_terminate(&buf) == 0) {
+        http_response_add_body_cstr(res, buf.items);
+    }
+    strbuf_free(&buf);
+    json_free_value(&value);
+}
+
+void http_response_json_raw(Http_Response *res, Http_Status status, const char *body)
+{
+    http_response_set_status(res, status);
+    http_response_set_header_replace(res, "Content-Type", "application/json; charset=utf-8");
+    http_response_add_body_cstr(res, body);
 }
 
 void http_response_set_cors(Http_Response *res, const char *origin)

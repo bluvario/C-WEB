@@ -519,8 +519,15 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
             fputs("    cweb_tpl_capture_end(res);\n"
                   // a response that never went through the capture (static
                   // files from the /* mount) is served as-is, not framed; a
-                  // blank page is indistinguishable and stays unwrapped
+                  // blank page is indistinguishable and stays unwrapped;
+                  // no_layout lets a handler (e.g. a JSON endpoint) opt out
+                  // of the layout while keeping its captured body
                   "    if (cweb_tpl_layout_body().count == 0) {\n"
+                  "        return;\n"
+                  "    }\n"
+                  "    if (res->no_layout) {\n"
+                  "        res->body.count = 0;\n"
+                  "        http_response_add_body(res, cweb_tpl_layout_body());\n"
                   "        return;\n"
                   "    }\n"
                   "    res->body.count = 0;\n"
@@ -536,6 +543,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
                 "    cweb_fallback(req, res, params, user_data);\n"
                 "    cweb_tpl_capture_end(res);\n"
                 "    if (cweb_tpl_layout_body().count == 0) {\n"
+                "        return;\n"
+                "    }\n"
+                "    if (res->no_layout) {\n"
+                "        res->body.count = 0;\n"
+                "        http_response_add_body(res, cweb_tpl_layout_body());\n"
                 "        return;\n"
                 "    }\n"
                 "    res->body.count = 0;\n"

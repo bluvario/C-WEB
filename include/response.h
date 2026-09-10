@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "http.h"
+#include "json.h"
 #include "strbuf.h"
 #include "sv.h"
 
@@ -21,6 +22,7 @@ typedef struct {
     Strbuf body;    // the actual payload; HEAD requests keep it for length
     bool suppress_body; // serialize headers but emit no body bytes
     bool keep_alive; // advertise Connection: keep-alive instead of close
+    bool no_layout;  // when set the generated layout wrapper skips framing
     Http_Stream_Fn stream_fn; // when set the body is chunked and streamed
     void *stream_user;
 } Http_Response;
@@ -32,6 +34,12 @@ void http_response_set_status(Http_Response *res, Http_Status status);
 // appends a header. calling it twice with the same name emits it twice,
 // replacing existing headers is not implemented yet.
 void http_response_set_header(Http_Response *res, const char *name, const char *value);
+
+// replaces every existing header with this name (any case) by the given
+// value; the new line lands at the end. an absent header is appended like
+// http_response_set_header. handy when a handler wants to override a
+// framework-provided default such as Content-Type.
+void http_response_set_header_replace(Http_Response *res, const char *name, const char *value);
 
 // scans the response's header text for name (any case) and returns a heap
 // copy of its value, or NULL when the header is absent. caller xfrees it.
@@ -55,6 +63,15 @@ void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_
 // 301/302/303/307/308 are valid redirect codes, anything else quietly
 // becomes a 302.
 void http_response_redirect(Http_Response *res, Http_Status status, const char *location);
+
+// sets Content-Type: application/json; charset=utf-8, serializes the value
+// compactly, appends it to the body, and frees the tree. the value is
+// consumed: do not touch it afterwards.
+void http_response_json(Http_Response *res, Http_Status status, Json_Value value);
+
+// sets Content-Type: application/json; charset=utf-8 and appends body as-is,
+// for callers that already hold serialized JSON text.
+void http_response_json_raw(Http_Response *res, Http_Status status, const char *body);
 
 // allows browser JavaScript from *origin to read this response ("*" opens it
 // to any origin without credentials). also marks it with Vary: Origin so
