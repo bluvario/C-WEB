@@ -35,6 +35,13 @@ typedef struct {
     // middleware that keys on the client, like per-IP rate limiting.
     String_View remote;
 
+    // unique identifier for this request, set by the request-id middleware
+    // (http_request_id_middleware) when it runs. data points at heap storage
+    // owned by the request object and released by http_request_free, so the
+    // view stays valid for the whole request/response cycle. empty when the
+    // middleware is not in the chain.
+    String_View request_id;
+
     Http_Header_Array headers;
 
     // filled in by the router when a route carries a timeout override.

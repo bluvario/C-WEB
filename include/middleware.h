@@ -55,6 +55,10 @@ void http_middleware_data_free(void *handler_data);
 // file may be NULL (defaults to stderr).
 typedef struct {
     FILE *file;
+    // when non-zero and the request carries a request id (the request-id
+    // middleware ran before this logger), a trailing token with that id is
+    // appended to the line. zero (the default) keeps the plain CLF shape.
+    int include_request_id;
 } Http_AccessLog_Opts;
 
 // logs one CLF-style line per completed request:

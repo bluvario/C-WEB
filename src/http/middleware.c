@@ -129,12 +129,16 @@ void http_access_log_middleware(Http_Request *req, Http_Response *res,
     }
     char ts[64];
     clf_timestamp(ts, sizeof ts);
-    fprintf(f, "- - %s \"%s %.*s %.*s\" %d %zu %llu\n",
+    fprintf(f, "- - %s \"%s %.*s %.*s\" %d %zu %llu",
             ts,
             method,
             (int)req->path.count, req->path.data,
             (int)req->version.count, req->version.data,
             (int)res->status,
             res->body.count, elapsed);
+    if (opts != NULL && opts->include_request_id && req->request_id.count > 0) {
+        fprintf(f, " %.*s", (int)req->request_id.count, req->request_id.data);
+    }
+    fprintf(f, "\n");
     fflush(f);
 }
