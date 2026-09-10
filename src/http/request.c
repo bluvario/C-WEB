@@ -79,6 +79,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->remote = (String_View){0};
     req->route_timeout_ms = 0;
     req->request_id = (String_View){0};
+    req->auth_user = (String_View){0};
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
@@ -224,12 +225,15 @@ int http_request_decode_chunked(Http_Request *req, char *raw, size_t raw_count,
 
 void http_request_free(Http_Request *req)
 {
-    // request_id is the one view in the struct that borrows from *our* heap
-    // rather than the request buffer (the request-id middleware copies it in),
-    // so it is the sole field the destructor owns
+    // request_id and auth_user are the two views in the struct that borrow
+    // from *our* heap rather than the request buffer (their middleware copies
+    // them in), so they are the only fields the destructor owns
     xfree((void *)req->request_id.data);
     req->request_id.data = NULL;
     req->request_id.count = 0;
+    xfree((void *)req->auth_user.data);
+    req->auth_user.data = NULL;
+    req->auth_user.count = 0;
     xfree(req->headers.items);
     req->headers.items = NULL;
     req->headers.count = 0;

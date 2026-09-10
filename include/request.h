@@ -42,6 +42,12 @@ typedef struct {
     // middleware is not in the chain.
     String_View request_id;
 
+    // authenticated username, set by http_basic_auth_middleware when it runs
+    // and the request carried valid credentials. same ownership and lifetime
+    // as request_id: heap storage released by http_request_free, empty when
+    // the guard (or the chain it guards) did not run.
+    String_View auth_user;
+
     Http_Header_Array headers;
 
     // filled in by the router when a route carries a timeout override.
