@@ -111,6 +111,16 @@ int main(void)
             strcmp(http_session_value(a, "user"), "alice") == 0);
         fails += check("bob's session sees its own data",
             strcmp(http_session_value(b, "user"), "bob") == 0);
+
+        // http_session_del removes exactly one key and reports presence
+        fails += check("del removes an existing key",
+            http_session_del(a, "theme") == 1 &&
+            http_session_value(a, "theme") == NULL);
+        fails += check("del leaves the rest of the session alone",
+            http_session_value(a, "user") != NULL &&
+            strcmp(http_session_value(a, "user"), "alice") == 0);
+        fails += check("del of a never-set key reports absence",
+            http_session_del(a, "nope") == 0);
         http_session_store_free(&s);
     }
 
@@ -327,12 +337,30 @@ int main(void)
         fails += check("dump leaves the record readable",
             cweb_db_get(&db, sv_from_cstr(key)).data != NULL);
 
+        // crash #3: a single-key delete is durable like a set. drop "theme",
+        // free the store without a dump, and the fresh store must not
+        // resurrect the removed key while the sibling survives
+        fails += check("del removes the mirrored key",
+            http_session_del(reloaded, "theme") == 1);
+        http_session_store_free(&s3);
+
+        Http_Session_Store s4;
+        http_session_store_init(&s4, 0);
+        http_session_store_set_db(&s4, &db);
+        Http_Session *chopped = http_session_open(&s4, tok_copy);
+        fails += check("session survived the third crash", chopped != NULL);
+        fails += check("deleted key stayed gone",
+            http_session_value(chopped, "theme") == NULL);
+        fails += check("sibling key survived the delete",
+            http_session_value(chopped, "user") != NULL &&
+            strcmp(http_session_value(chopped, "user"), "alice") == 0);
+
         // destroying removes the record so it cannot be resurrected
-        http_session_destroy(&s3, tok_copy);
+        http_session_destroy(&s4, tok_copy);
         fails += check("destroyed session's record is deleted",
             cweb_db_get(&db, sv_from_cstr(key)).data == NULL);
 
-        http_session_store_free(&s3);
+        http_session_store_free(&s4);
         cweb_db_close(&db);
         unlink(dbpath);
         rmdir(dir);

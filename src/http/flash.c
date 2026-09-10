@@ -43,7 +43,7 @@ char *http_flash_get(Http_Session *sesh, const char *key)
     char *owned = xmalloc(n + 1);
     memcpy(owned, value, n);
     owned[n] = '\0';
-    strmap_delete(&sesh->data, sv_from_cstr(kbuf));
+    http_session_del(sesh, kbuf); // mirrors the removal to a backing db
     return owned;
 }
 
@@ -51,7 +51,7 @@ char *http_flash_get(Http_Session *sesh, const char *key)
 // probe cluster so the session map stays consistent for everyone else
 static void clear_one(Http_Session *sesh, const char *key)
 {
-    strmap_delete(&sesh->data, sv_from_cstr(key));
+    http_session_del(sesh, key); // mirrored: a crash cannot replay a read flash
 }
 
 size_t http_flash_render(Http_Response *res, Http_Session *sesh)

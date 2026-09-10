@@ -72,6 +72,11 @@ void http_session_set(Http_Session *sesh, const char *key, const char *value);
 // NULL when the key was never set
 const char *http_session_value(Http_Session *sesh, const char *key);
 
+// removes a single key from a session. a backing db mirrors the removal the
+// same way set() mirrors additions, so a crash cannot resurrect a key that
+// was already deleted. returns 1 when the key existed, 0 otherwise.
+int http_session_del(Http_Session *sesh, const char *key);
+
 // removes a token entirely; unknown tokens are ignored
 void http_session_destroy(Http_Session_Store *s, const char *token);
 

@@ -1,10 +1,15 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "db.h"
 #include "flash.h"
 #include "response.h"
 #include "session.h"
+#include "sv.h"
 #include "xmem.h"
 
 static int check(const char *what, int cond)
@@ -100,6 +105,71 @@ int main(void)
     xfree(got);
 
     http_session_store_free(&s);
+
+    // flash consumption is mirrored to a backing db: another copy of the
+    // session (e.g. after the server crashes and restarts) must not replay a
+    // flash that was already read or rendered
+    {
+        char dir[] = "/tmp/cweb_flash_db_XXXXXX";
+        fails += check("mkdtemp for flash db", mkdtemp(dir) != NULL);
+        char dbpath[256];
+        snprintf(dbpath, sizeof dbpath, "%s/flash.db", dir);
+
+        Cweb_Db db;
+        fails += check("db opens", cweb_db_open(&db, dbpath) == 0);
+
+        Http_Session_Store s;
+        http_session_store_init(&s, 0);
+        http_session_store_set_db(&s, &db);
+        char *tok = http_session_create(&s, 0);
+        fails += check("db-backed session created", tok != NULL);
+        Http_Session *sesh = http_session_open(&s, tok);
+
+        // flash_get consumption must be durable
+        http_flash_set(sesh, "read", "consumed by get");
+        char *got = http_flash_get(sesh, "read");
+        fails += check("flash read before the crash", got != NULL &&
+                       strcmp(got, "consumed by get") == 0);
+        xfree(got);
+        char tok_copy[128];
+        snprintf(tok_copy, sizeof tok_copy, "%s", tok);
+        http_session_store_free(&s); // the crash: no dump
+
+        Http_Session_Store s2;
+        http_session_store_init(&s2, 0);
+        http_session_store_set_db(&s2, &db);
+        Http_Session *re = http_session_open(&s2, tok_copy);
+        fails += check("session reloaded after the crash", re != NULL);
+        got = http_flash_get(re, "read");
+        fails += check("consumed flash did not replay after the crash",
+            got == NULL);
+        xfree(got);
+
+        // render consumption is durable too
+        http_flash_set(re, "shown", "consumed by render");
+        Http_Response res;
+        http_response_init(&res);
+        size_t shown = http_flash_render(&res, re);
+        strbuf_null_terminate(&res.body);
+        fails += check("render shows the pending flash", shown == 1 &&
+                       strstr(res.body.items, "consumed by render") != NULL);
+        http_response_free(&res);
+        http_session_store_free(&s2); // crash #2, again no dump
+
+        Http_Session_Store s3;
+        http_session_store_init(&s3, 0);
+        http_session_store_set_db(&s3, &db);
+        Http_Session *re3 = http_session_open(&s3, tok_copy);
+        Http_Response res2;
+        http_response_init(&res2);
+        fails += check("rendered flash did not replay after the crash",
+            re3 != NULL && http_flash_render(&res2, re3) == 0);
+        http_response_free(&res2);
+        http_session_store_free(&s3);
+        cweb_db_close(&db);
+        unlink(dbpath);
+        rmdir(dir);
+    }
 
     if (fails == 0) {
         printf("flash ok\n");

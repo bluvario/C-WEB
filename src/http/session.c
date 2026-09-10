@@ -238,6 +238,33 @@ const char *http_session_value(Http_Session *sesh, const char *key)
     return v;
 }
 
+// removes a single key from a session. mirrored to a backing db exactly like
+// http_session_set, so a deletion is durable the moment it happens and a
+// later restart cannot replay the removed value.
+int http_session_del(Http_Session *sesh, const char *key)
+{
+    if (sesh->store == NULL) {
+        int present = strmap_get_cstr(&sesh->data, key) != NULL;
+        strmap_delete(&sesh->data, sv_from_cstr(key));
+        return present;
+    }
+    Http_Session_Store *s = sesh->store;
+    mutex_lock(&s->mu);
+    int present = strmap_get_cstr(&sesh->data, key) != NULL;
+    if (present) {
+        strmap_delete(&sesh->data, sv_from_cstr(key));
+        if (s->db != NULL) {
+            size_t i = session_index(s, sesh);
+            if (i != SIZE_MAX) {
+                session_to_db(s, i);
+                cweb_db_sync(s->db);
+            }
+        }
+    }
+    mutex_unlock(&s->mu);
+    return present;
+}
+
 void http_session_destroy(Http_Session_Store *s, const char *token)
 {
     mutex_lock(&s->mu);
