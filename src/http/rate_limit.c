@@ -35,6 +35,41 @@ void http_rate_limiter_clear(Http_RateLimiter *rl)
     rl->count = 0;
 }
 
+// read-only bucket lookup; returns NULL if the key has no bucket yet.
+static Http_RateLimit_Bucket *find_bucket(const Http_RateLimiter *rl,
+                                          String_View key)
+{
+    char flat[key.count + 1];
+    if (key.count > 0) {
+        memcpy(flat, key.data, key.count);
+    }
+    flat[key.count] = '\0';
+    for (size_t i = 0; i < rl->count; i++) {
+        if (strcmp(rl->items[i].key, flat) == 0) {
+            return &rl->items[i];
+        }
+    }
+    return NULL;
+}
+
+void http_rate_limiter_status(const Http_RateLimiter *rl, String_View key,
+                              Http_RateLimit_Status *out)
+{
+    out->limit = (int)rl->burst;
+    out->remaining = 0;
+    out->reset = 0;
+    const Http_RateLimit_Bucket *b = find_bucket(rl, key);
+    if (b == NULL) {
+        out->remaining = out->limit;
+        return;
+    }
+    out->remaining = b->tokens >= 0.0 ? (int)b->tokens : 0;
+    if (rl->rate > 0.0 && b->tokens < rl->burst) {
+        double secs = (rl->burst - b->tokens) / rl->rate;
+        out->reset = (int)(secs + 0.999);
+    }
+}
+
 // one bucket per key (owned copy of the key string). the table stays small —
 // a handful of routes or callers — so linear search is fine and keeps a hash
 // table out of the way.
@@ -100,7 +135,19 @@ void http_rate_limit_middleware(Http_Request *req, Http_Response *res,
         key = sv_from_cstr("/");
     }
 
-    if (http_rate_limiter_allow(rl, key) == 0) {
+    int allowed = http_rate_limiter_allow(rl, key) == 0;
+
+    Http_RateLimit_Status st;
+    http_rate_limiter_status(rl, key, &st);
+    char buf[32];
+    snprintf(buf, sizeof buf, "%d", st.limit);
+    http_response_set_header(res, "X-RateLimit-Limit", buf);
+    snprintf(buf, sizeof buf, "%d", st.remaining);
+    http_response_set_header(res, "X-RateLimit-Remaining", buf);
+    snprintf(buf, sizeof buf, "%d", st.reset);
+    http_response_set_header(res, "X-RateLimit-Reset", buf);
+
+    if (allowed) {
         next(req, res, next_data);
         return;
     }
@@ -113,7 +160,6 @@ void http_rate_limit_middleware(Http_Request *req, Http_Response *res,
                                                   : time_mono_ms();
     Http_RateLimit_Bucket *b = bucket_for(rl, key, now);
     double retry = (1.0 - b->tokens) / rl->rate;
-    char buf[32];
     if (retry < 0.0001) {
         strcpy(buf, "1");
     } else {

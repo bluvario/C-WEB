@@ -31,6 +31,13 @@ typedef struct {
     void *key_user;
 } Http_RateLimiter;
 
+// bucket snapshot returned by http_rate_limiter_status()
+typedef struct {
+    int limit;      // burst ceiling (max tokens)
+    int remaining;  // tokens left after the most recent allow()
+    int reset;      // seconds until the bucket refills to full
+} Http_RateLimit_Status;
+
 void http_rate_limiter_init(Http_RateLimiter *rl, double rate, double burst);
 void http_rate_limiter_free(Http_RateLimiter *rl);
 // drops every bucket so a drained limiter starts over
@@ -39,6 +46,11 @@ void http_rate_limiter_clear(Http_RateLimiter *rl);
 // consumes one token for key. 0 = allowed through, -1 = rate exhausted.
 // buckets are created on first sight and pruned only by clear().
 int http_rate_limiter_allow(Http_RateLimiter *rl, String_View key);
+
+// fills out with the bucket state for the given key after a prior allow()
+// call. if no bucket exists yet, out is zeroed.
+void http_rate_limiter_status(const Http_RateLimiter *rl, String_View key,
+                              Http_RateLimit_Status *out);
 
 // middleware: pulls the request's key (key_fn, defaulting to the request
 // path) and passes through while a token remains; when the bucket is dry it

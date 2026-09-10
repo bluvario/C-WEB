@@ -161,14 +161,33 @@ int main(void)
 
         fn(&req, &res, data);
         fails += check("first request passes", ran == 1);
+        // on the first allowed request: bucket went from burst=2 → 1
+        {
+            Http_RateLimit_Status st;
+            http_rate_limiter_status(&rl, sv_from_cstr("/x"), &st);
+            fails += check("first: limit=2", st.limit == 2);
+            fails += check("first: remaining=1", st.remaining == 1);
+        }
         fn(&req, &res, data);
         fails += check("second request passes", ran == 2);
+        // after second allow: bucket went from 1 → 0
+        {
+            Http_RateLimit_Status st;
+            http_rate_limiter_status(&rl, sv_from_cstr("/x"), &st);
+            fails += check("second: remaining=0", st.remaining == 0);
+        }
         fn(&req, &res, data);
         fails += check("third request is cut off", ran == 2);
         fails += check("denied request is 429",
             res.status == HTTP_429_TOO_MANY_REQUESTS);
         fails += check("429 carries Retry-After",
             strstr(res.headers.items, "Retry-After: 1\r\n") != NULL);
+        fails += check("429 carries X-RateLimit-Limit",
+            strstr(res.headers.items, "X-RateLimit-Limit: 2\r\n") != NULL);
+        fails += check("429 carries X-RateLimit-Remaining 0",
+            strstr(res.headers.items, "X-RateLimit-Remaining: 0\r\n") != NULL);
+        fails += check("429 carries X-RateLimit-Reset",
+            strstr(res.headers.items, "X-RateLimit-Reset: 1\r\n") != NULL);
 
         http_response_free(&res);
         http_response_init(&res);
@@ -176,6 +195,12 @@ int main(void)
         fn(&req, &res, data);
         fails += check("refilled request passes", ran == 3);
         fails += check("refilled response is untouched", res.status == HTTP_200_OK);
+        fails += check("refilled carries X-RateLimit-Limit",
+            strstr(res.headers.items, "X-RateLimit-Limit: 2\r\n") != NULL);
+        fails += check("refilled carries X-RateLimit-Remaining 0",
+            strstr(res.headers.items, "X-RateLimit-Remaining: 0\r\n") != NULL);
+        fails += check("refilled carries X-RateLimit-Reset",
+            strstr(res.headers.items, "X-RateLimit-Reset: 1\r\n") != NULL);
 
         http_response_free(&res);
         http_middleware_data_free(data);
@@ -202,6 +227,44 @@ int main(void)
         fails += check("bob is a separate bucket",
             http_rate_limiter_allow(&rl, sv_from_cstr("bob")) == 0);
         http_request_free(&req);
+        http_rate_limiter_free(&rl);
+    }
+
+    // status() reports the bucket state without consuming a token
+    {
+        Http_RateLimiter rl;
+        http_rate_limiter_init(&rl, 2.0, 3.0);
+        fake_now = 0;
+        rl.clock_ms = fake_clock;
+        String_View k = sv_from_cstr("/s");
+        Http_RateLimit_Status st;
+
+        http_rate_limiter_status(&rl, k, &st);
+        fails += check("no bucket: remaining=burst", st.remaining == 3);
+        fails += check("no bucket: reset=0", st.reset == 0);
+
+        http_rate_limiter_allow(&rl, k); // 3→2
+        http_rate_limiter_status(&rl, k, &st);
+        fails += check("after allow: remaining=2", st.remaining == 2);
+        fails += check("after allow: limit=3", st.limit == 3);
+        fails += check("after allow: reset=1", st.reset == 1); // ceil((3-2)/2)=1
+
+        http_rate_limiter_allow(&rl, k); // 2→1
+        http_rate_limiter_status(&rl, k, &st);
+        fails += check("second allow: remaining=1", st.remaining == 1);
+
+        http_rate_limiter_allow(&rl, k); // 1→0
+        http_rate_limiter_status(&rl, k, &st);
+        fails += check("drained: remaining=0", st.remaining == 0);
+        fails += check("drained: reset=2", st.reset == 2); // ceil((3-0)/2)=2
+
+        // status() must not consume a token: three consecutive calls leave
+        // the bucket untouched
+        http_rate_limiter_status(&rl, k, &st);
+        http_rate_limiter_status(&rl, k, &st);
+        http_rate_limiter_status(&rl, k, &st);
+        fails += check("status is idempotent", st.remaining == 0);
+
         http_rate_limiter_free(&rl);
     }
 
