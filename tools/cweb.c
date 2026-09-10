@@ -386,6 +386,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "static const char *cweb_csp = NULL;\n"
         "static const char *cweb_csp_report_only = NULL;\n"
         "\n"
+        "// per-route timeout overrides from --route-timeout PATH MS\n"
+        "#define CWEB_MAX_ROUTE_TIMEOUTS 32\n"
+        "static const char *cweb_route_timeout_paths[CWEB_MAX_ROUTE_TIMEOUTS];\n"
+        "static unsigned long cweb_route_timeout_ms[CWEB_MAX_ROUTE_TIMEOUTS];\n"
+        "static int cweb_route_timeout_count = 0;\n"
+        "\n"
         "// parses \"8192\", \"8k\", \"8K\", \"2m\", \"1g\" into bytes for\n"
         "// --max-body; 0 on an empty or non-numeric argument\n"
         "static size_t cweb_size_arg(const char *s)\n"
@@ -593,6 +599,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
              "            cweb_csp = argv[++i];\n"
              "        } else if (strcmp(argv[i], \"--csp-report-only\") == 0 && i + 1 < argc) {\n"
              "            cweb_csp_report_only = argv[++i];\n"
+             "        } else if (strcmp(argv[i], \"--route-timeout\") == 0 && i + 2 < argc) {\n"
+             "            if (cweb_route_timeout_count < CWEB_MAX_ROUTE_TIMEOUTS) {\n"
+             "                cweb_route_timeout_paths[cweb_route_timeout_count] = argv[++i];\n"
+             "                cweb_route_timeout_ms[cweb_route_timeout_count] = strtoul(argv[++i], NULL, 10);\n"
+             "                cweb_route_timeout_count++;\n"
+             "            }\n"
          "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
@@ -676,6 +688,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs(
         "    if (cweb_static_cache > 0) {\n"
         "        http_static_set_cache(cweb_static_cache);\n"
+        "    }\n"
+        "    // apply per-route timeout overrides\n"
+        "    for (int i = 0; i < cweb_route_timeout_count; i++) {\n"
+        "        if (router_set_timeout(&r, HTTP_GET, cweb_route_timeout_paths[i], cweb_route_timeout_ms[i]) == 0)\n"
+        "            router_set_timeout(&r, HTTP_POST, cweb_route_timeout_paths[i], cweb_route_timeout_ms[i]);\n"
         "    }\n",
         f);
     fputc('\n', f);
@@ -1359,7 +1376,10 @@ static void usage(FILE *f)
           "--csp POLICY (Content-Security-Policy on every response, replacing\n"
           "the built-in default-src 'self' directive) and --csp-report-only\n"
           "POLICY (a monitoring-only policy alongside it), and\n"
-          "--log FILE (append Common Log Format access lines to FILE).\n");
+          "--log FILE (append Common Log Format access lines to FILE), and\n"
+         "--route-timeout PATH MS (set SO_RCVTIMEO to MS milliseconds for the\n"
+         "next request on a keep-alive connection after serving PATH; a stall\n"
+         "then produces 504 instead of the default 408; repeat for more routes).\n");
 }
 
 int main(int argc, char **argv)

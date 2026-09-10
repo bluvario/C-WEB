@@ -31,6 +31,7 @@ typedef enum {
     HTTP_501_NOT_IMPLEMENTED = 501,
     HTTP_502_BAD_GATEWAY = 502,
     HTTP_503_SERVICE_UNAVAILABLE = 503,
+    HTTP_504_GATEWAY_TIMEOUT = 504,
 } Http_Status;
 
 typedef enum {

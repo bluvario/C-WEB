@@ -36,9 +36,34 @@ int router_add(Http_Router *r, Http_Method method, const char *pattern,
     strcpy(route.pattern, pattern);
     route.handler = handler;
     route.user_data = user_data;
+    route.timeout_ms = 0;
 
     da_append(r, route);
     return 0;
+}
+
+int router_add_timeout(Http_Router *r, Http_Method method, const char *pattern,
+                       Http_Route_Handler handler, void *user_data,
+                       unsigned long timeout_ms)
+{
+    int rc = router_add(r, method, pattern, handler, user_data);
+    if (rc == 0) {
+        r->items[r->count - 1].timeout_ms = timeout_ms;
+    }
+    return rc;
+}
+
+int router_set_timeout(Http_Router *r, Http_Method method, const char *pattern,
+                       unsigned long timeout_ms)
+{
+    for (size_t i = 0; i < r->count; i++) {
+        if (r->items[i].method == method &&
+            strcmp(r->items[i].pattern, pattern) == 0) {
+            r->items[i].timeout_ms = timeout_ms;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 // is name already one of the comma-separated tokens in allow[0..len-1]?
@@ -95,6 +120,7 @@ void router_dispatch(Http_Request *req, Http_Response *res, void *user_data)
 
         if (route_path_matches(route->pattern, req->path, method_matches ? &params : NULL)) {
             if (method_matches) {
+                req->route_timeout_ms = route->timeout_ms;
                 route->handler(req, res, &params, route->user_data);
                 if (as_head) {
                     res->suppress_body = true; // spill the body, keep length

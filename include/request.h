@@ -36,6 +36,12 @@ typedef struct {
     String_View remote;
 
     Http_Header_Array headers;
+
+    // filled in by the router when a route carries a timeout override.
+    // the server uses this to reset SO_RCVTIMEO after each response so the
+    // next request on a keep-alive connection uses the matched route's budget.
+    // zero means "use the server default".
+    unsigned long route_timeout_ms;
 } Http_Request;
 
 typedef enum {

@@ -358,6 +358,48 @@ int main(void)
     rmdir("build/mnt/css");
     rmdir("build/mnt");
 
+    // router_add_timeout propagates to req->route_timeout_ms
+    {
+        Http_Router rt;
+        router_init(&rt);
+        router_add(&rt, HTTP_GET, "/fast", user_handler, &a);
+        router_add_timeout(&rt, HTTP_GET, "/slow", user_handler, &a, 5000);
+
+        http_request_parse(&req, sv_from_cstr("GET /fast HTTP/1.1\r\nHost: x\r\n\r\n"));
+        http_response_init(&res);
+        router_dispatch(&req, &res, &rt);
+        if (req.route_timeout_ms != 0) {
+            fprintf(stderr, "fast route should have no timeout, got %lu\n",
+                    req.route_timeout_ms);
+            return 1;
+        }
+        http_response_free(&res);
+        http_request_free(&req);
+
+        http_request_parse(&req, sv_from_cstr("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"));
+        http_response_init(&res);
+        router_dispatch(&req, &res, &rt);
+        if (req.route_timeout_ms != 5000) {
+            fprintf(stderr, "slow route should have 5000ms timeout, got %lu\n",
+                    req.route_timeout_ms);
+            return 1;
+        }
+        http_response_free(&res);
+        http_request_free(&req);
+
+        router_free(&rt);
+    }
+
+    // HTTP 504 has the correct reason phrase
+    {
+        const char *reason = http_status_reason(HTTP_504_GATEWAY_TIMEOUT);
+        if (strcmp(reason, "Gateway Timeout") != 0) {
+            fprintf(stderr, "504 reason should be 'Gateway Timeout', got '%s'\n",
+                    reason);
+            return 1;
+        }
+    }
+
     printf("router ok\n");
     return 0;
 }

@@ -30,7 +30,9 @@ const char *http_status_reason(Http_Status status)
     case HTTP_429_TOO_MANY_REQUESTS: return "Too Many Requests";
     case HTTP_500_INTERNAL_SERVER_ERROR: return "Internal Server Error";
     case HTTP_501_NOT_IMPLEMENTED: return "Not Implemented";
+    case HTTP_502_BAD_GATEWAY: return "Bad Gateway";
     case HTTP_503_SERVICE_UNAVAILABLE: return "Service Unavailable";
+    case HTTP_504_GATEWAY_TIMEOUT: return "Gateway Timeout";
     default: return "Unknown";
     }
 }

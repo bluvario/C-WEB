@@ -165,16 +165,21 @@ static void send_error(Socket_Handle client, Http_Status status)
 
 // pulls the next chunk of request bytes into the read buffer. returns 0 when
 // bytes arrived, -1 when the connection is past saving: clean EOF and socket
-// errors just close, but a client that stalls mid-request gets a 408 before
-// the door shuts.
-static int fill_more(Socket_Handle client, Read_Buffer *rb)
+// errors just close, but a client that stalls mid-request gets a 408 (or 504
+// when a per-route timeout is active) before the door shuts.
+static int fill_more(Socket_Handle client, Read_Buffer *rb,
+                     bool route_timeout_active)
 {
     String_View head = rb_write_head(rb);
     long n = net_recv(client, (void *)head.data, head.count);
     if (n == NET_READ_TIMEOUT) {
         if (rb->count > 0) {
-            log_warn("client stalled mid-request, sending 408");
-            send_error(client, HTTP_408_REQUEST_TIMEOUT);
+            Http_Status timeout_status = route_timeout_active
+                                             ? HTTP_504_GATEWAY_TIMEOUT
+                                             : HTTP_408_REQUEST_TIMEOUT;
+            log_warn("client stalled mid-request, sending %d",
+                     (int)timeout_status);
+            send_error(client, timeout_status);
         }
         return -1;
     }
@@ -270,6 +275,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
 
     char peer_buf[INET6_ADDRSTRLEN];
     String_View remote = peer_ip(client, peer_buf);
+    bool route_timeout_active = false;
 
     for (;;) {
         Request_Parse_Result pr;
@@ -287,7 +293,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                     rb_free(&rb);
                     return;
                 }
-                if (fill_more(client, &rb) != 0) {
+                if (fill_more(client, &rb, route_timeout_active) != 0) {
                     rb_free(&rb);
                     return;
                 }
@@ -309,7 +315,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                         rb_free(&rb);
                         return;
                     }
-                    if (fill_more(client, &rb) != 0) {
+                    if (fill_more(client, &rb, route_timeout_active) != 0) {
                         rb_free(&rb);
                         return;
                     }
@@ -350,6 +356,17 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
             wire_bytes = is_head ? 0 : (long long)res.body.count;
         }
         log_access(&req, &res, wire_bytes);
+
+        // apply the matched route's timeout for the next request on this
+        // keep-alive connection so a slow client hits 504 instead of 408
+        if (req.route_timeout_ms > 0) {
+            net_set_timeout(client, req.route_timeout_ms);
+            route_timeout_active = true;
+        } else {
+            net_set_timeout(client, timeout_ms);
+            route_timeout_active = false;
+        }
+
         http_request_free(&req);
         http_response_free(&res);
 

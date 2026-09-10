@@ -77,6 +77,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->method = HTTP_UNKNOWN_METHOD;
     req->target = req->path = req->query = req->version = req->body = (String_View){0};
     req->remote = (String_View){0};
+    req->route_timeout_ms = 0;
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
