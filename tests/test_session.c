@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include "response.h"
 #include "session.h"
 #include "sv.h"
+#include "thread.h"
 
 static int check(const char *what, int cond)
 {
@@ -34,6 +36,30 @@ static int token_shape_ok(const char *tok)
         }
     }
     return 1;
+}
+
+// shared state for the concurrent-store stress: CWORKERS threads churn create/
+// open/set/destroy on one store, each keeping a single session behind, then
+// the main thread reopens every kept session to prove handles survive growth
+// and swap-removes from other threads
+#define CWORKERS 8
+#define COPS 200
+static Http_Session_Store race_store;
+static char *race_tokens[CWORKERS];
+
+static void race_worker(void *arg)
+{
+    long id = (long)arg;
+    for (int i = 0; i < COPS; i++) {
+        char *scratch = http_session_create(&race_store, 0);
+        Http_Session *h = http_session_open(&race_store, scratch);
+        http_session_set(h, "scratch", "churn");
+        http_session_set(h, "more", "yes");
+        http_session_destroy(&race_store, scratch);
+    }
+    char *mine = http_session_create(&race_store, 0);
+    http_session_set(http_session_open(&race_store, mine), "owner", "alice");
+    race_tokens[id] = mine;
 }
 
 int main(void)
@@ -159,6 +185,33 @@ int main(void)
         fails += check("live session survived the sweep",
             http_session_open(&s, t_kept) != NULL);
         http_session_store_free(&s);
+    }
+
+    // thread safety: many threads churn one shared store; every kept session
+    // must survive with its data intact after the dust settles
+    {
+        http_session_store_init(&race_store, 0);
+        Thread ts[CWORKERS];
+        for (int i = 0; i < CWORKERS; i++) {
+            fails += check("worker thread spawns",
+                thread_init(&ts[i], race_worker, (void *)(intptr_t)i) == 0);
+        }
+        for (int i = 0; i < CWORKERS; i++) {
+            fails += check("worker thread joins", thread_join(&ts[i]) == 0);
+        }
+        fails += check("all kept sessions survived the chaos",
+            race_store.count == CWORKERS);
+        for (int i = 0; i < CWORKERS; i++) {
+            Http_Session *keep = http_session_open(&race_store, race_tokens[i]);
+            fails += check("kept session still opens after the chaos", keep != NULL);
+            fails += check("kept session's data is intact",
+                keep != NULL && http_session_value(keep, "owner") != NULL &&
+                strcmp(http_session_value(keep, "owner"), "alice") == 0);
+        }
+        http_session_reap(&race_store);
+        fails += check("reap leaves the live sessions alone",
+            race_store.count == CWORKERS);
+        http_session_store_free(&race_store);
     }
 
     // cookie glue: load from the request header

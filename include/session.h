@@ -9,6 +9,7 @@
 #include "request.h"
 #include "response.h"
 #include "strmap.h"
+#include "thread.h"
 
 // a server-side session: an opaque random token on the client maps to this
 // key/value bag stored on the server, so clients can neither read nor forge
@@ -18,19 +19,25 @@ typedef struct Http_Session_Store Http_Session_Store; // forward decl, defined b
 typedef struct {
     Str_Map data;           // owned key/value copies
     time_t expires;         // epoch seconds, 0 = never expires
-    Http_Session_Store *store; // mirror target: set() writes changes through
+    Http_Session_Store *store; // owner: set() mirrors changes through it
 } Http_Session;
 
 struct Http_Session_Store {
-    Http_Session *sessions; // parallel arrays, one per token
-    char **tokens;
+    Mutex mu;           // serializes every operation below and the arrays
+    Http_Session **sessions; // parallel arrays; each session is its own heap
+    char **tokens;          // object so handles survive slot-table growth
     size_t count;
     size_t capacity;
     time_t default_ttl; // seconds http_session_create uses when ttl < 0, 0 = forever
     Cweb_Db *db;        // optional backing store; NULL = in-memory only
 };
 
-// not thread-safe: give the store a lock, or hold one store per worker thread.
+// thread-safe: every store call is serialized by the store's own mutex, and a
+// handle stays valid while other threads create or destroy sessions (sessions
+// are heap objects and only the slot table moves on growth). the caller still
+// owns its own thread discipline: two threads using the SAME handle at once
+// race their key writes just like shared variables, and destroying a session
+// while another thread holds its handle is a use-after-free by design.
 void http_session_store_init(Http_Session_Store *s, time_t default_ttl);
 void http_session_store_free(Http_Session_Store *s);
 
