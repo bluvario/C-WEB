@@ -31,7 +31,8 @@ bool sv_consume_prefix(String_View *sv, const char *prefix);
 // the last piece has no delim after it.
 String_View sv_chop_by_delim(String_View *sv, char delim);
 
-// parses a decimal integer, returns false on garbage input
+// parses a decimal integer, returns false on garbage input or overflow past
+// LLONG_MAX (LLONG_MIN is not representable through unsigned magnitude)
 bool sv_to_i64(String_View sv, long long *out);
 
 // how many times a byte shows up in sv

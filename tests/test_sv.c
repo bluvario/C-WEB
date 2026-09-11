@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdio.h>
 
 #include "sv.h"
@@ -52,6 +53,42 @@ int main(void)
     if (sv_to_i64(sv_from_cstr("12x"), &parsed) || sv_to_i64(sv_from_cstr(""), &parsed)) {
         fprintf(stderr, "sv_to_i64 accepted garbage\n");
         return 1;
+    }
+
+    // overflow boundary cases
+    {
+        // LLONG_MAX fits exactly
+        if (!sv_to_i64(sv_from_cstr("9223372036854775807"), &parsed) ||
+            parsed != LLONG_MAX) {
+            fprintf(stderr, "sv_to_i64 rejected LLONG_MAX\n");
+            return 1;
+        }
+        // one past LLONG_MAX must be rejected (would be UB without the guard)
+        if (sv_to_i64(sv_from_cstr("9223372036854775808"), &parsed)) {
+            fprintf(stderr, "sv_to_i64 accepted LLONG_MAX+1\n");
+            return 1;
+        }
+        // huge string is rejected
+        if (sv_to_i64(sv_from_cstr("999999999999999999999"), &parsed)) {
+            fprintf(stderr, "sv_to_i64 accepted a 19-nines string\n");
+            return 1;
+        }
+        // -LLONG_MAX fits (magnitude = LLONG_MAX, representable)
+        if (!sv_to_i64(sv_from_cstr("-9223372036854775807"), &parsed) ||
+            parsed != -LLONG_MAX) {
+            fprintf(stderr, "sv_to_i64 rejected -LLONG_MAX\n");
+            return 1;
+        }
+        // -LLONG_MAX-1 is not representable (magnitude LLONG_MAX+1 overflows)
+        if (sv_to_i64(sv_from_cstr("-9223372036854775808"), &parsed)) {
+            fprintf(stderr, "sv_to_i64 accepted -LLONG_MAX-1\n");
+            return 1;
+        }
+        // leading zeros are handled
+        if (!sv_to_i64(sv_from_cstr("00042"), &parsed) || parsed != 42) {
+            fprintf(stderr, "sv_to_i64 failed on leading zeros\n");
+            return 1;
+        }
     }
 
     printf("sv ok\n");

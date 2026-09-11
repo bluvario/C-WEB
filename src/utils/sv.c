@@ -1,6 +1,7 @@
 #include "sv.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <string.h>
 
 String_View sv_from_cstr(const char *s)
@@ -88,8 +89,11 @@ bool sv_to_i64(String_View sv, long long *out)
         if (c < '0' || c > '9') {
             return false;
         }
-        // TODO: overflow past LLONG_MAX is not detected
-        n = n * 10 + (c - '0');
+        int d = c - '0';
+        if (n > (LLONG_MAX - d) / 10) {
+            return false;
+        }
+        n = n * 10 + d;
     }
     *out = neg ? -n : n;
     return true;
