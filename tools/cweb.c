@@ -546,13 +546,16 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     if (has_404) {
         fputs(
             "// last resort: let the static root claim first, and when that also\n"
-            "// misses, drop its plain-text answer and render the app's 404 page\n"
+            "// misses, drop its plain-text answer and render the app's 404 page.\n"
+            "// a file the static root served is a raw asset, not a page: flag it\n"
+            "// no_layout so a layout wrapper hands the bytes through untouched.\n"
             "static void cweb_fallback(Http_Request *req, Http_Response *res,\n"
             "                          Str_Map *params, void *user_data)\n"
             "{\n"
             "    if (cweb_static_root[0] != '\\0') {\n"
             "        http_serve_static(req, res, (void *)cweb_static_root);\n"
             "        if (res->status != HTTP_404_NOT_FOUND) {\n"
+            "            res->no_layout = 1;\n"
             "            return;\n"
             "        }\n"
             "        res->status = HTTP_404_NOT_FOUND;\n"
