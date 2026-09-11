@@ -25,7 +25,9 @@ static void stamp_preflight_headers(Http_Response *res,
                                     const char *origin)
 {
     http_response_set_header(res, "Access-Control-Allow-Origin", origin);
-    http_response_set_header(res, "Vary", "Origin");
+    // Vary may already carry another negotiation selector (e.g. gzip's
+    // Accept-Encoding), so append instead of replacing
+    http_response_append_header(res, "Vary", "Origin");
     http_response_set_header(res, "Access-Control-Allow-Methods",
                              opts->methods ? opts->methods : CORS_DEFAULT_METHODS);
     http_response_set_header(res, "Access-Control-Allow-Headers",
@@ -75,7 +77,9 @@ void http_cors_middleware(Http_Request *req, Http_Response *res,
 
     // actual request: stamp CORS headers then let the handler run
     http_response_set_header(res, "Access-Control-Allow-Origin", origin_buf);
-    http_response_set_header(res, "Vary", "Origin");
+    // may coexist with another Vary selector (e.g. Accept-Encoding), so
+    // append rather than replacing it
+    http_response_append_header(res, "Vary", "Origin");
     if (opts->credentials) {
         http_response_set_header(res, "Access-Control-Allow-Credentials", "true");
     }

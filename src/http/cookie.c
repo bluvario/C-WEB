@@ -50,7 +50,9 @@ void http_response_set_cookie(Http_Response *res, const char *name, const char *
     }
 
     strbuf_null_terminate(&h);
-    http_response_set_header(res, "Set-Cookie", h.items);
+    // Set-Cookie is the repeatable field: several cookies may ride on one
+    // response, so append rather than replace
+    http_response_append_header(res, "Set-Cookie", h.items);
     strbuf_free(&h);
 }
 

@@ -61,14 +61,22 @@ void http_response_init(Http_Response *res);
 void http_response_free(Http_Response *res);
 
 void http_response_set_status(Http_Response *res, Http_Status status);
-// appends a header. calling it twice with the same name emits it twice,
-// replacing existing headers is not implemented yet.
+// sets a header value, replacing any existing header with the same name
+// (case-insensitive); the new line lands at the end. an absent header is
+// simply appended, so setting the same header twice yields one line holding
+// the latest value.
 void http_response_set_header(Http_Response *res, const char *name, const char *value);
 
+// appends a header line without touching existing lines of the same name.
+// for fields a response may legitimately repeat (Set-Cookie with several
+// cookies in one answer, Vary with several negotiation selectors), where
+// replace-by-name would silently drop earlier lines. most callers want
+// http_response_set_header.
+void http_response_append_header(Http_Response *res, const char *name, const char *value);
+
 // replaces every existing header with this name (any case) by the given
-// value; the new line lands at the end. an absent header is appended like
-// http_response_set_header. handy when a handler wants to override a
-// framework-provided default such as Content-Type.
+// value; the new line lands at the end. equivalent to
+// http_response_set_header; kept for source compatibility.
 void http_response_set_header_replace(Http_Response *res, const char *name, const char *value);
 
 // scans the response's header text for name (any case) and returns a heap

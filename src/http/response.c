@@ -42,22 +42,31 @@ void http_response_set_status(Http_Response *res, Http_Status status)
     res->status = status;
 }
 
-void http_response_set_header(Http_Response *res, const char *name, const char *value)
+// emits a "Name: value" line. when replace is true any existing line with
+// the same name (any case) is dropped first and the new line lands at the
+// end; otherwise the line is appended untouched, so repeatable fields like
+// Set-Cookie can carry several lines in one response.
+static void response_emit_header(Http_Response *res, const char *name,
+                                 const char *value, bool replace)
 {
-    strbuf_append_cstr(&res->headers, name);
-    strbuf_append_cstr(&res->headers, ": ");
-    strbuf_append_cstr(&res->headers, value);
-    strbuf_append_cstr(&res->headers, "\r\n");
-}
+    if (!replace) {
+        strbuf_append_cstr(&res->headers, name);
+        strbuf_append_cstr(&res->headers, ": ");
+        strbuf_append_cstr(&res->headers, value);
+        strbuf_append_cstr(&res->headers, "\r\n");
+        return;
+    }
 
-void http_response_set_header_replace(Http_Response *res, const char *name, const char *value)
-{
     size_t nn = strlen(name);
     Strbuf out;
     strbuf_init(&out);
 
     // copy every line that does not start with "name:" (any case); the
-    // replacement is appended after them all, so later headers move up
+    // replacement is appended after them all, so later headers move up. the
+    // first matching line's exact spelling is reused for the new line, so a
+    // later setter that writes the name in a different case does not
+    // re-cast a canonical header like Content-Type.
+    const char *matched = NULL;
     size_t at = 0;
     while (at < res->headers.count) {
         size_t line_end = at;
@@ -77,6 +86,9 @@ void http_response_set_header_replace(Http_Response *res, const char *name, cons
                 }
             }
         }
+        if (match && matched == NULL) {
+            matched = res->headers.items + at;
+        }
         if (!match) {
             strbuf_append(&out, res->headers.items + at, line_len);
             if (line_end < res->headers.count) {
@@ -86,7 +98,7 @@ void http_response_set_header_replace(Http_Response *res, const char *name, cons
         at = line_end < res->headers.count ? line_end + 1 : res->headers.count;
     }
 
-    strbuf_append_cstr(&out, name);
+    strbuf_append(&out, matched != NULL ? matched : name, nn);
     strbuf_append_cstr(&out, ": ");
     strbuf_append_cstr(&out, value);
     strbuf_append_cstr(&out, "\r\n");
@@ -96,6 +108,21 @@ void http_response_set_header_replace(Http_Response *res, const char *name, cons
 
     strbuf_free(&res->headers);
     res->headers = out;
+}
+
+void http_response_set_header(Http_Response *res, const char *name, const char *value)
+{
+    response_emit_header(res, name, value, true);
+}
+
+void http_response_append_header(Http_Response *res, const char *name, const char *value)
+{
+    response_emit_header(res, name, value, false);
+}
+
+void http_response_set_header_replace(Http_Response *res, const char *name, const char *value)
+{
+    response_emit_header(res, name, value, true);
 }
 
 void http_response_add_body(Http_Response *res, String_View data)

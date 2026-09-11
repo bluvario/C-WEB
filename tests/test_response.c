@@ -195,6 +195,43 @@ int main(void)
                    strstr(res.headers.items, "X-Test: final\r\n") != NULL);
     http_response_free(&res);
 
+    // set_header now replaces by name by itself: the second call must not
+    // leave a duplicate line, any-case matching included
+    http_response_init(&res);
+    http_response_set_header(&res, "X-Swap", "first");
+    http_response_set_header(&res, "x-swap", "second");
+    fails += check("set_header dedups across case",
+                   strstr(res.headers.items, "X-Swap: first\r\n") == NULL &&
+                   strstr(res.headers.items, "X-Swap: second\r\n") != NULL);
+    size_t swap_headers = 0;
+    for (size_t i = 0; i + 6 < res.headers.count; i++) {
+        if (strncmp(res.headers.items + i, "X-Swap", 6) == 0 ||
+            strncmp(res.headers.items + i, "x-swap", 6) == 0) {
+            swap_headers++;
+        }
+    }
+    fails += check("set_header leaves exactly one line", swap_headers == 1);
+    fails += check("set_header keeps the first-seen name casing",
+                   strstr(res.headers.items, "X-Swap: second\r\n") != NULL);
+    http_response_free(&res);
+
+    // append_header exists for repeatable fields: two distinct Set-Cookie
+    // lines must both reach the wire
+    http_response_init(&res);
+    http_response_append_header(&res, "Set-Cookie", "sid=abc");
+    http_response_append_header(&res, "Set-Cookie", "theme=dark; Path=/; HttpOnly");
+    fails += check("append keeps both repeatable lines",
+                   strstr(res.headers.items, "Set-Cookie: sid=abc\r\n") != NULL &&
+                   strstr(res.headers.items, "Set-Cookie: theme=dark; Path=/; HttpOnly\r\n") != NULL);
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    if (strbuf_null_terminate(&wire) != 0) return 1;
+    fails += check("appended headers land on the wire",
+                   strstr(wire.items, "Set-Cookie: sid=abc\r\n") != NULL &&
+                   strstr(wire.items, "Set-Cookie: theme=dark; Path=/; HttpOnly\r\n") != NULL);
+    http_response_free(&res);
+    strbuf_free(&wire);
+
     // no_layout starts false and is not serialized to the wire
     http_response_init(&res);
     fails += check("no_layout defaults to false", res.no_layout == false);

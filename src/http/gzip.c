@@ -149,7 +149,8 @@ void http_gzip_middleware(Http_Request *req, Http_Response *res,
             strbuf_free(&res->body);
             res->body = gz; // ownership moves; server recomputes Content-Length
             http_response_set_header(res, "Content-Encoding", "gzip");
-            http_response_set_header(res, "Vary", "Accept-Encoding");
+            // Vary may already list Origin etc., so append the new selector
+            http_response_append_header(res, "Vary", "Accept-Encoding");
         } else {
             strbuf_free(&gz);
         }
