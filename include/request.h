@@ -35,6 +35,14 @@ typedef struct {
     // middleware that keys on the client, like per-IP rate limiting.
     String_View remote;
 
+    // effective client address after trusted-proxy resolution, set by
+    // http_client_ip_middleware. borrows from the request buffer (like remote,
+    // and like remote it is the direct peer when no trusted proxy is in play);
+    // empty when the middleware is not in the chain. consumers that want "who
+    // is really calling" — access logs, per-address rate buckets — read this
+    // instead of remote.
+    String_View client_ip;
+
     // unique identifier for this request, set by the request-id middleware
     // (http_request_id_middleware) when it runs. data points at heap storage
     // owned by the request object and released by http_request_free, so the

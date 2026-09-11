@@ -172,7 +172,11 @@ String_View http_rate_limit_user_key(Http_Request *req, void *user_data)
         }
     }
 
-    // nobody claimed an identity: bill the calling address
+    // nobody claimed an identity: bill the effective calling address — the
+    // trusted-proxy-resolved client when one has been recorded, else the peer
+    if (req->client_ip.count > 0) {
+        return req->client_ip;
+    }
     return req->remote;
 }
 

@@ -80,6 +80,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->route_timeout_ms = 0;
     req->request_id = (String_View){0};
     req->auth_user = (String_View){0};
+    req->client_ip = (String_View){0};
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;

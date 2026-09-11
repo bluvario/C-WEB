@@ -79,12 +79,15 @@ static void log_access(Http_Request *req, Http_Response *res, long long bytes)
 {
     char date[40];
     http_date_clf(time(NULL), date, sizeof date);
-    if (req->remote.count == 0) {
-        req->remote = sv_from_cstr("0.0.0.0"); // match the peer fallback
+    // the host field names the real caller: the trusted-proxy-resolved client
+    // when one is known, else the peer address
+    String_View who = req->client_ip.count > 0 ? req->client_ip : req->remote;
+    if (who.count == 0) {
+        who = sv_from_cstr("0.0.0.0");
     }
     Strbuf line;
     strbuf_init(&line);
-    strbuf_append(&line, req->remote.data, req->remote.count);
+    strbuf_append(&line, who.data, who.count);
     strbuf_append_cstr(&line, " - - [");
     strbuf_append_cstr(&line, date);
     strbuf_append_cstr(&line, "] \"");

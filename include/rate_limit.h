@@ -48,7 +48,8 @@ typedef struct {
 //      bucket even before the password is verified, which throttles guessing
 //      one account across every caller IP instead of letting a fresh address
 //      reroll the budget on each attempt;
-//   3. otherwise the caller's req->remote address.
+//   3. otherwise the effective caller's address: req->client_ip when a
+//      trusted-proxy middleware recorded one, else req->remote.
 //
 // step 2 only needs the header, so it also throttles failed logins: put this
 // key function on a limiter that runs *outside* the auth guard and a
