@@ -62,8 +62,12 @@ typedef struct {
 } Http_AccessLog_Opts;
 
 // logs one CLF-style line per completed request:
-//   - - [10/Oct/2000:13:55:36 +0300] "GET /path HTTP/1.1" 200 2326 5
-// (client-ip and ident are placeholders; last field is elapsed ms)
+//   203.0.113.7 - [10/Oct/2000:13:55:36 +0300] "GET /path HTTP/1.1" 200 2326 5
+// the host field names the real caller: the trusted-proxy-resolved client IP
+// when one has been recorded (the client-ip middleware ran before this), else
+// the peer address, so a reverse proxy never hides the client from the log.
+// path and version are \xHH-escaped so a hostile target cannot forge fields.
+// last field is elapsed ms.
 void http_access_log_middleware(Http_Request *req, Http_Response *res,
                                 void *user_data,
                                 Http_Handler_Fn next, void *next_data);

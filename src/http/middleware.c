@@ -112,6 +112,23 @@ static void clf_timestamp(char *buf, size_t n)
     }
 }
 
+// control bytes, quotes and backslashes become \xHH so a hostile request
+// target cannot forge fields or new lines in the log; mirrors the server's
+// own log_access() escaping so the two access-log paths agree byte for byte
+static void clf_append_escaped(Strbuf *line, String_View s)
+{
+    for (size_t i = 0; i < s.count; i++) {
+        unsigned char c = (unsigned char)s.data[i];
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') {
+            char esc[8];
+            snprintf(esc, sizeof esc, "\\x%02X", c);
+            strbuf_append_cstr(line, esc);
+        } else {
+            strbuf_append_char(line, (char)c);
+        }
+    }
+}
+
 void http_access_log_middleware(Http_Request *req, Http_Response *res,
                                 void *user_data,
                                 Http_Handler_Fn next, void *next_data)
@@ -123,22 +140,42 @@ void http_access_log_middleware(Http_Request *req, Http_Response *res,
     Http_AccessLog_Opts *opts = user_data;
     FILE *f = (opts != NULL && opts->file != NULL) ? opts->file : stderr;
 
+    // the host field names the real caller: the trusted-proxy-resolved client
+    // when one is known, else the peer address, else a placeholder
+    String_View who = req->client_ip.count > 0 ? req->client_ip : req->remote;
+    if (who.count == 0) {
+        who = sv_from_cstr("0.0.0.0");
+    }
+
     const char *method = http_method_name(req->method);
     if (method == NULL) {
         method = "-";
     }
     char ts[64];
     clf_timestamp(ts, sizeof ts);
-    fprintf(f, "- - %s \"%s %.*s %.*s\" %d %zu %llu",
-            ts,
-            method,
-            (int)req->path.count, req->path.data,
-            (int)req->version.count, req->version.data,
-            (int)res->status,
-            res->body.count, elapsed);
+
+    Strbuf line;
+    strbuf_init(&line);
+    strbuf_append(&line, who.data, who.count);
+    strbuf_append_cstr(&line, " - ");
+    strbuf_append_cstr(&line, ts);
+    strbuf_append_cstr(&line, " \"");
+    strbuf_append_cstr(&line, method);
+    strbuf_append_char(&line, ' ');
+    clf_append_escaped(&line, req->path);
+    strbuf_append_char(&line, ' ');
+    clf_append_escaped(&line, req->version);
+    strbuf_append_cstr(&line, "\" ");
+    char field[48];
+    snprintf(field, sizeof field, "%d %zu %llu",
+             (int)res->status, res->body.count, elapsed);
+    strbuf_append_cstr(&line, field);
     if (opts != NULL && opts->include_request_id && req->request_id.count > 0) {
-        fprintf(f, " %.*s", (int)req->request_id.count, req->request_id.data);
+        strbuf_append_char(&line, ' ');
+        strbuf_append(&line, req->request_id.data, req->request_id.count);
     }
-    fprintf(f, "\n");
+    strbuf_append_cstr(&line, "\n");
+    fwrite(line.items, 1, line.count, f);
     fflush(f);
+    strbuf_free(&line);
 }
