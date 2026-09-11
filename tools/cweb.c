@@ -384,6 +384,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "static unsigned long cweb_io_timeout_ms = 0;\n"
         "static size_t cweb_workers = 0;\n"
         "\n"
+        "// directory for spilling oversized request bodies to disk, from\n"
+        "// --body-dir; NULL keeps the in-RAM cap (413) behaviour\n"
+        "static const char *cweb_body_dir = NULL;\n"
+        "\n"
         "// shared secret for HMAC-signed requests, from --signature-secret;\n"
         "// NULL keeps request signing off entirely\n"
         "static const char *cweb_signature_secret = NULL;\n"
@@ -523,6 +527,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs("    if (cweb_max_body > 0) "
           "printf(\"max-body: %zu bytes\\n\", cweb_max_body);\n",
           f);
+    fputs("    if (cweb_body_dir != NULL) "
+          "printf(\"body-dir: %s\\n\", cweb_body_dir);\n",
+          f);
     fputs("    if (cweb_io_timeout_ms > 0) "
           "printf(\"io-timeout: %lums\\n\", cweb_io_timeout_ms);\n",
           f);
@@ -652,9 +659,11 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            log_path = argv[++i];\n"
         "        } else if (strcmp(argv[i], \"--static-cache\") == 0 && i + 1 < argc) {\n"
         "            cweb_static_cache = strtoul(argv[++i], NULL, 10);\n"
-        "        } else if (strcmp(argv[i], \"--max-body\") == 0 && i + 1 < argc) {\n"
-        "            cweb_max_body = cweb_size_arg(argv[++i]);\n"
-        "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
+"        } else if (strcmp(argv[i], \"--max-body\") == 0 && i + 1 < argc) {\n"
+            "            cweb_max_body = cweb_size_arg(argv[++i]);\n"
+            "        } else if (strcmp(argv[i], \"--body-dir\") == 0 && i + 1 < argc) {\n"
+            "            cweb_body_dir = argv[++i];\n"
+            "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
         "            cweb_io_timeout_ms = strtoul(argv[++i], NULL, 10);\n"
 "        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
             "            cweb_workers = strtoul(argv[++i], NULL, 10);\n"
@@ -859,6 +868,7 @@ fputs(
         "    }\n"
         "    Http_Server_Config cfg = {0};\n"
         "    cfg.max_body = cweb_max_body;\n"
+        "    cfg.body_dir = cweb_body_dir;\n"
         "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
         "    cfg.workers = cweb_workers;\n"
         "\n"
@@ -1609,8 +1619,11 @@ static void usage(FILE *f)
           "reverse proxies in these networks, giving the real client instead\n"
           "of the proxy in logs and per-address rate buckets),\n"
           "--max-body BYTES (request size cap, 413 past it; accepts k/m/g\n"
-         "suffixes like 4k or 2m), --io-timeout MS (per-read deadline, stalled\n"
-         "clients get 408) and --workers N (accept-loop threads, default one\n"
+          "suffixes like 4k or 2m) --body-dir DIR (with --max-body set, stream\n"
+          "oversized bodies to temp files in DIR, mapped back and then\n"
+          "unlinked, instead of answering 413), --io-timeout MS (per-read\n"
+          "deadline, stalled\n"
+          "clients get 408) and --workers N (accept-loop threads, default one\n"
 "per core), and\n"
           "--signature-secret SECRET (fall back on a reverse proxy that stamps\n"
           "every request with HMAC-SHA256 of \"METHOD\\nPATH\\nUNIX-SECONDS\\nBODY\"\n"

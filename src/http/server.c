@@ -1,14 +1,20 @@
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 
 #include "server.h"
 
 #include <ctype.h>
 #ifndef _WIN32
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #endif
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "buffer.h"
@@ -265,6 +271,46 @@ static bool conn_keep_alive(Http_Request *req)
     return !close && (http11 || keep);
 }
 
+#ifndef _WIN32
+// creates a fresh temp file inside dir for spilling an oversized request
+// body and hands back its fd and (heap) path, or -1 when the directory is
+// missing/unwritable. the body bytes stream in on the socket side as the
+// connection recv()s, so only the return path of http_serve_connection
+// "uploads" them.
+static int spill_open(const char *dir, char **path_out)
+{
+    char tmpl[4096];
+    int n = snprintf(tmpl, sizeof tmpl, "%s/cweb-body-XXXXXX", dir);
+    if (n < 0 || (size_t)n >= sizeof tmpl) {
+        return -1;
+    }
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        return -1;
+    }
+    *path_out = strdup(tmpl);
+    return fd;
+}
+
+// writes every byte to fd, retrying short writes; -1 on error
+static int spill_write_all(int fd, const void *data, size_t len)
+{
+    const char *p = data;
+    while (len > 0) {
+        long n = write(fd, p, len);
+        if (n < 0) {
+            return -1;
+        }
+        if (n == 0) {
+            return -1; // shouldn't happen for a regular file
+        }
+        p += (size_t)n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+#endif
+
 // caller's address as text, handed to every request on this connection via
 // req->remote; "0.0.0.0" stands in when the peer address cannot be resolved
 static String_View peer_ip(Socket_Handle client, char buf[INET6_ADDRSTRLEN])
@@ -309,6 +355,17 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
     // slowloris backstop
     net_set_timeout(client, timeout_ms);
 
+    // POSIX-only: request bodies larger than the in-RAM cap spill to a temp
+// file in cfg->body_dir and are mapped back, so oversized uploads stream
+// through a worker without hoarding RAM. Windows keeps the 413. chunked
+// bodies (no Content-Length to budget against) and oversized header blocks
+// also keep the 413.
+#ifndef _WIN32
+    int spill_fd = -1;
+    char *spill_path = NULL;
+    size_t spill_written = 0;
+#endif
+
     char peer_buf[INET6_ADDRSTRLEN];
     String_View remote = peer_ip(client, peer_buf);
     bool route_timeout_active = false;
@@ -321,15 +378,144 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         // fill the buffer until a whole request is staged; pipelined bytes
         // already buffered just parse without another recv
         for (;;) {
+#ifndef _WIN32
+            // the declared body is streaming into the spill file: keep
+            // draining the socket until Content-Length bytes are on disk,
+            // then map the file back so req->body reads exactly as usual
+            if (spill_fd >= 0) {
+                char stage[65536];
+                long n = net_recv(client, stage, sizeof stage);
+                if (n == NET_READ_TIMEOUT) {
+                    if (rb.count > 0) {
+                        Http_Status st = route_timeout_active
+                                             ? HTTP_504_GATEWAY_TIMEOUT
+                                             : HTTP_408_REQUEST_TIMEOUT;
+                        log_warn("client stalled mid-body, sending %d",
+                                 (int)st);
+                        send_error(client, st);
+                    }
+                    close(spill_fd);
+                    unlink(spill_path);
+                    xfree(spill_path);
+                    http_request_free(&req);
+                    rb_free(&rb);
+                    return;
+                }
+                if (n <= 0) {
+                    // peer went away mid-body, nothing to answer
+                    close(spill_fd);
+                    unlink(spill_path);
+                    xfree(spill_path);
+                    http_request_free(&req);
+                    rb_free(&rb);
+                    return;
+                }
+                size_t declared = (size_t)req.content_length;
+                size_t take = 0;
+                if (spill_written < declared) {
+                    take = (size_t)n < declared - spill_written
+                               ? (size_t)n : declared - spill_written;
+                    if (take > 0) {
+                        if (spill_write_all(spill_fd, stage, take) != 0) {
+                            log_warn("cannot write spilled body, 500");
+                            close(spill_fd);
+                            unlink(spill_path);
+                            xfree(spill_path);
+                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            http_request_free(&req);
+                            rb_free(&rb);
+                            return;
+                        }
+                        spill_written += take;
+                    }
+                }
+                if (spill_written >= declared) {
+                    // bytes past Content-Length belong to the next request
+                    size_t surplus = (size_t)n - take;
+                    if (surplus > 0) {
+                        // body complete: park pipelined bytes for the next
+                        // request, right after this request's header block
+                        memmove(rb.data + req.body_offset,
+                                stage + (size_t)n - surplus, surplus);
+                        rb.count = req.body_offset + surplus;
+                    }
+                    // map the spilled bytes back into req->body
+                    void *map = mmap(NULL, spill_written, PROT_READ,
+                                     MAP_PRIVATE, spill_fd, 0);
+                    close(spill_fd);
+                    spill_fd = -1;
+                    if (map == MAP_FAILED) {
+                        log_warn("cannot map spilled body, 500");
+                        unlink(spill_path);
+                        xfree(spill_path);
+                        send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                        http_request_free(&req);
+                        rb_free(&rb);
+                        return;
+                    }
+                    req.body = (String_View){map, spill_written};
+                    req.body_mmap = map;
+                    req.body_mmap_len = spill_written;
+                    req.body_file_path = spill_path;
+                    spill_path = NULL;
+                    consumed = req.body_offset;
+                    break; // body mapped, ready to dispatch
+                }
+                continue; // keep draining the declared body
+            }
+#endif
+
             pr = http_request_parse_adv(&req, rb_view(&rb), &consumed);
             if (pr == REQ_INCOMPLETE) {
                 if (rb.count >= rb.capacity) {
+#ifndef _WIN32
+                    // a declared length past the in-RAM cap starts a spill
+                    // when --body-dir is configured; the header block (and
+                    // the views borrowed from it) stays put in RAM while the
+                    // body streams past it to disk
+                    if (cfg->body_dir != NULL &&
+                        req.content_length > (long long)max_body &&
+                        req.body_offset > 0 && rb.count > req.body_offset) {
+                        // the parser released this request's headers when it
+                        // saw the body was still short; put them back before
+                        // the body streams out to disk so dispatch still sees
+                        // Content-Type and friends
+                        http_request_parse_header_block(
+                            &req, (String_View){rb.data, req.body_offset});
+                        spill_fd = spill_open(cfg->body_dir, &spill_path);
+                        if (spill_fd < 0) {
+                            log_warn("cannot open spill dir %s, 500",
+                                     cfg->body_dir);
+                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            http_request_free(&req);
+                            rb_free(&rb);
+                            return;
+                        }
+                        if (spill_write_all(spill_fd,
+                                            rb.data + req.body_offset,
+                                            rb.count - req.body_offset) != 0) {
+                            log_warn("cannot write spilled body, 500");
+                            close(spill_fd);
+                            unlink(spill_path);
+                            xfree(spill_path);
+                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            http_request_free(&req);
+                            rb_free(&rb);
+                            return;
+                        }
+                        spill_written = rb.count - req.body_offset;
+                        rb.count = req.body_offset; // headers only in RAM
+                        continue; // loop back into the drain arm
+                    }
+#endif
                     log_warn("request exceeds %zu bytes, sending 413", max_body);
                     send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                    http_request_free(&req);
                     rb_free(&rb);
                     return;
                 }
                 if (fill_more(client, &rb, route_timeout_active) != 0) {
+                    http_request_free(&req);
                     rb_free(&rb);
                     return;
                 }

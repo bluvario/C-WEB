@@ -3,6 +3,13 @@
 #include <ctype.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #include "da.h"
 #include "sv.h"
 #include "xmem.h"
@@ -81,6 +88,11 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->request_id = (String_View){0};
     req->auth_user = (String_View){0};
     req->client_ip = (String_View){0};
+    req->content_length = -1;
+    req->body_offset = 0;
+    req->body_mmap = NULL;
+    req->body_mmap_len = 0;
+    req->body_file_path = NULL;
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
@@ -109,6 +121,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     }
 
     req->body = (String_View){raw.data + end, raw.count - end};
+    req->body_offset = end;
     const String_View *cl = http_request_get_header(req, "content-length");
     if (cl) {
         long long len;
@@ -116,6 +129,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
             http_request_free(req);
             return REQ_ERROR;
         }
+        req->content_length = len;
         if ((size_t)len < req->body.count) {
             req->body.count = (size_t)len;
         } else if ((size_t)len > req->body.count) {
@@ -133,6 +147,25 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw)
 {
     size_t consumed;
     return http_request_parse_adv(req, raw, &consumed);
+}
+
+void http_request_parse_header_block(Http_Request *req, String_View head)
+{
+    size_t lineno = 0;
+    while (head.count > 0) {
+        String_View line = sv_chop_by_delim(&head, '\n');
+        if (line.count > 0 && line.data[line.count - 1] == '\r') {
+            line.count--;
+        }
+        if (lineno == 0) {
+            lineno++; // request line, already parsed by http_request_parse_adv
+            continue;
+        }
+        if (line.count == 0) {
+            break; // blank line ends the header block
+        }
+        parse_header_line(req, line);
+    }
 }
 
 static int hex_value(char c)
@@ -239,6 +272,21 @@ void http_request_free(Http_Request *req)
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
+    // a spilled body is a temp file mapped read-only for the handler; release
+    // the mapping (POSIX only — the server never spills on Windows) and
+    // unlink the backing file
+#ifndef _WIN32
+    if (req->body_mmap != NULL) {
+        munmap(req->body_mmap, req->body_mmap_len);
+        req->body_mmap = NULL;
+        req->body_mmap_len = 0;
+    }
+    if (req->body_file_path != NULL) {
+        unlink(req->body_file_path);
+        xfree(req->body_file_path);
+        req->body_file_path = NULL;
+    }
+#endif
 }
 
 const String_View *http_request_get_header(Http_Request *req, const char *name)

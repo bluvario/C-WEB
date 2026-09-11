@@ -27,8 +27,26 @@ typedef struct {
     // everything after the header block, clamped to Content-Length when the
     // header is present, or contiguous decoded bytes after a chunked body has
     // been unfolded by http_request_decode_chunked. the view borrows from the
-    // raw request bytes.
+    // raw request bytes. when the body exceeds the server's in-RAM cap and a
+    // --body-dir is configured the server spills the body to a temp file and
+    // mmap's it back; req->body then borrows from the mapping (freed on
+    // request cleanup).
     String_View body;
+
+    // once the header block has been parsed — even while the declared body
+    // has not fully arrived — these two fields tell the server where the body
+    // starts in the staging buffer and how many bytes were promised by
+    // Content-Length. the server uses them to route oversized bodies straight
+    // to disk instead of returning a 413.
+    long long content_length; // Content-Length or -1
+    size_t    body_offset;   // byte index into the staging buffer (header block length)
+
+    // when a body has been spilled to a temp file the server mmap's it back
+    // so handlers read req->body exactly as before. these track that mapping;
+    // http_request_free tears it down.
+    void  *body_mmap;       // PROT_READ mapping of the spilled body, NULL when in-RAM
+    size_t body_mmap_len;   // bytes mapped
+    char  *body_file_path;  // heap-allocated temp path to unlink on free
 
     // caller's IP address as text, filled in by the server for the lifetime
     // of the connection; empty in hand-constructed requests. handy for
@@ -76,6 +94,13 @@ Request_Parse_Result http_request_parse(Http_Request *req, String_View raw);
 // to this one request (headers plus declared body), so the socket layer can
 // keep any pipelined remainder buffered.
 Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, size_t *consumed);
+// Re-parses only the header lines out of an already-parsed request's header
+// block (request line included; it is skipped). The request parser releases a
+// request's headers whenever it reports an incomplete body, so the server's
+// spill-to-disk path — which keeps an oversized request alive until its body
+// lands on disk — calls this to restore them before dispatch. req->headers
+// must be empty on entry.
+void http_request_parse_header_block(Http_Request *req, String_View head);
 // Unfolds a Transfer-Encoding: chunked body in place inside raw (the buffer
 // the request bytes live in and that req->body borrows from), leaving req->body
 // pointing at contiguous decoded bytes. On success sets *consumed to the full

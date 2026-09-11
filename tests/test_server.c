@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -33,6 +34,16 @@ static void handler_fn(Http_Request *req, Http_Response *res, void *user_data)
     strbuf_free(&body);
 }
 
+// echoes the request body back verbatim so the spill test can prove the
+// full payload survived the mmap round-trip
+static void echo_body_fn(Http_Request *req, Http_Response *res, void *user_data)
+{
+    (void)user_data;
+    http_response_set_status(res, HTTP_200_OK);
+    http_response_set_header(res, "Content-Type", "application/octet-stream");
+    http_response_add_body(res, req->body);
+}
+
 // POSTs fill 'x' bytes against a running server; returns a heap copy of the
 // whole response (or NULL when the connection fails)
 static char *post_body(int port, const char *path, size_t len)
@@ -60,6 +71,58 @@ static char *post_body(int port, const char *path, size_t len)
     }
     size_t cap = 8192, got = 0;
     char *buf = malloc(cap);
+    long n;
+    while (got < cap - 1 && (n = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
+// sends a POST with a deterministic non-homogeneous body so byte-for-byte
+// comparison is possible; each body byte is (base + i) & 0xff so the tail
+// is distinguishable from the head; the response buffer is heap-sized so
+// even a large spill-echoed body fits
+static char *post_pattern(int port, const char *path, size_t len,
+                          unsigned char base, char **body_out)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    char head[256];
+    int hl = snprintf(head, sizeof head,
+                      "POST %s HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Content-Length: %zu\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      path, len);
+    char *req = malloc((size_t)hl + len);
+    memcpy(req, head, (size_t)hl);
+    char *body = req + hl;
+    for (size_t i = 0; i < len; i++) {
+        body[i] = (char)((base + (unsigned char)i) & 0xff);
+    }
+    if (body_out != NULL) {
+        *body_out = malloc(len);
+        memcpy(*body_out, body, len);
+    }
+    long sent = net_send_all(s, req, (long)((size_t)hl + len));
+    free(req);
+    if (sent != (long)((size_t)hl + len)) {
+        net_close(s);
+        if (body_out != NULL && *body_out != NULL) {
+            free(*body_out);
+            *body_out = NULL;
+        }
+        return NULL;
+    }
+    // heap-size the response buffer so even a large echoed body fits
+    size_t cap = (size_t)hl + len + 1024;
+    char *buf = malloc(cap);
+    size_t got = 0;
     long n;
     while (got < cap - 1 && (n = net_recv(s, buf + got, cap - got - 1)) > 0) {
         got += (size_t)n;
@@ -305,6 +368,92 @@ int main(void)
     net_close(srv3);
     if (!ok3) {
         fprintf(stderr, "server did not recover from the EMFILE storm\n");
+        net_cleanup();
+        return 1;
+    }
+
+    // --- oversized body spill to disk via --body-dir ---
+    // a temp dir for the spill file, a server with max_body=2048 and
+    // body_dir set: a 4096-byte body must reach the handler (200 OK)
+    // instead of earning a 413, and the temp file must be gone after
+    // the response is sent
+    char spill_tmpdir[] = "/tmp/cweb-spill-test-XXXXXX";
+    if (mkdtemp(spill_tmpdir) == NULL) {
+        fprintf(stderr, "mkdtemp failed\n");
+        net_cleanup();
+        return 1;
+    }
+
+    Socket_Handle srv4 = net_listen(0);
+    if (srv4 == -1) {
+        fprintf(stderr, "fourth listen failed: %s\n", net_error_string());
+        rmdir(spill_tmpdir);
+        net_cleanup();
+        return 1;
+    }
+    int port4 = net_bound_port(srv4);
+    Http_Server_Config cfg4;
+    memset(&cfg4, 0, sizeof cfg4);
+    cfg4.max_body = 64 * 1024;
+    cfg4.body_dir = spill_tmpdir;
+    cfg4.io_timeout_ms = 500;
+    pid_t child4 = fork();
+    if (child4 == 0) {
+        log_set_level(LOG_WARN);
+        http_serve_config(srv4, echo_body_fn, NULL, &cfg4);
+        _exit(0);
+    }
+
+    // 800 bytes (below max_body) must still work the in-RAM path
+    resp = post_body(port4, "/small", 800);
+    int ok4 = resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+              strstr(resp, "small!") == NULL;  // echo handler echoes body, not path
+    free(resp);
+
+    // 256 KiB body (above max_body) must spill to disk and come back
+    // byte-for-byte identical; a non-homogeneous pattern (including null
+    // bytes) so tail corruption, truncation, or offsets are caught.
+    // the body length comes from the Content-Length header, never strlen:
+    // the pattern deliberately contains 0x00 bytes
+    char *expected_body = NULL;
+    char *resp256 = post_pattern(port4, "/big", 256 * 1024, 0xA1,
+                                 &expected_body);
+    ok4 = ok4 && resp256 != NULL &&
+          strstr(resp256, "HTTP/1.1 200 OK") != NULL;
+    if (ok4 && expected_body != NULL) {
+        char *cl = strstr(resp256, "Content-Length:");
+        long echo_len = cl ? strtol(cl + strlen("Content-Length:"), NULL, 10) : -1;
+        const char *body_start = strstr(resp256, "\r\n\r\n");
+        ok4 = echo_len == 256 * 1024 && body_start != NULL &&
+              memcmp(body_start + 4, expected_body, 256 * 1024) == 0;
+    }
+    free(expected_body);
+    free(resp256);
+
+    // the temp spill file must have been unlinked by http_request_free
+    {
+        DIR *d = opendir(spill_tmpdir);
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (strncmp(ent->d_name, "cweb-body-", 10) == 0) {
+                    ok4 = 0;
+                    break;
+                }
+            }
+            closedir(d);
+        }
+    }
+
+    kill(child4, SIGTERM);
+    waitpid(child4, NULL, 0);
+    net_close(srv4);
+
+    // clean up the temp dir
+    rmdir(spill_tmpdir);
+
+    if (!ok4) {
+        fprintf(stderr, "spill-to-disk test failed\n");
         net_cleanup();
         return 1;
     }
