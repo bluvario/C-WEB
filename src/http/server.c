@@ -482,7 +482,13 @@ int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler,
                 break;
             }
 #endif
-            // TODO: back off on EMFILE instead of spinning
+            // fd exhaustion drops the pending connection and the kernel
+            // retries the accept; spinning here would peg a core and flood
+            // the log, so pause and give a worker time to close a socket
+            // before trying again
+            if (net_exhausted_fds()) {
+                net_pause_ms(100);
+            }
             log_error("accept failed: %s", net_error_string());
             continue;
         }

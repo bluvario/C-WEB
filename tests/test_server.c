@@ -1,9 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -87,6 +91,23 @@ static char *stall_partial(int port)
     buf[got] = '\0';
     net_close(s);
     return buf;
+}
+
+// the fd-exhaustion child holds the process against its RLIMIT_NOFILE with a
+// wall of dummy descriptors; this detached thread frees them a second later so
+// the server's accept loop gets a chance to recover and answer again
+static int s_close_dummies[64];
+static int s_close_ndummies;
+
+static void *close_dummies_after_a_second(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {.tv_sec = 1, .tv_nsec = 0};
+    nanosleep(&ts, NULL);
+    for (int i = 0; i < s_close_ndummies; i++) {
+        close(s_close_dummies[i]);
+    }
+    return NULL;
 }
 
 int main(void)
@@ -201,6 +222,93 @@ int main(void)
     kill(child2, SIGTERM);
     waitpid(child2, NULL, 0);
     net_close(srv2);
+
+    // --- fd exhaustion (EMFILE) back-off ---
+    // a child walled against its own RLIMIT_NOFILE forces net_accept to fail
+    // with EMFILE; the accept loop must back off instead of spinning, then
+    // serve again the moment a descriptor is freed
+    Socket_Handle srv3 = net_listen(0);
+    if (srv3 == -1) {
+        fprintf(stderr, "third listen failed: %s\n", net_error_string());
+        net_cleanup();
+        return 1;
+    }
+    int port3 = net_bound_port(srv3);
+    pid_t child3 = fork();
+    if (child3 == 0) {
+        log_set_level(LOG_WARN);
+        int listen_fd = (int)(intptr_t)srv3;
+        struct rlimit rl;
+        rl.rlim_cur = (rlim_t)(listen_fd + 4);
+        rl.rlim_max = rl.rlim_cur;
+        if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+            _exit(1);
+        }
+        int ndummies = 0;
+        while (ndummies < 64) {
+            s_close_dummies[ndummies] = open("/dev/null", O_RDONLY);
+            if (s_close_dummies[ndummies] < 0) {
+                break;
+            }
+            ndummies++;
+        }
+        s_close_ndummies = ndummies;
+        // prove the wall is real: a fresh socket must come back as EMFILE
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        if (probe >= 0) {
+            close(probe);
+            _exit(1);
+        }
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t tid;
+        pthread_create(&tid, &attr, close_dummies_after_a_second, NULL);
+        pthread_attr_destroy(&attr);
+        http_serve(srv3, handler_fn, NULL);
+        _exit(0);
+    }
+
+    // give the child time to hit the wall, then probe once: the kernel
+    // queues (or drops) the connection while every fd is taken
+    struct timespec nap = {.tv_sec = 0, .tv_nsec = 400000000};
+    nanosleep(&nap, NULL);
+    Socket_Handle in_storm = net_connect("127.0.0.1", port3);
+    if (in_storm != -1) {
+        net_close(in_storm);
+    }
+    // let the dummy-closer free the fds, then the loop must serve again
+    nap.tv_sec = 1;
+    nap.tv_nsec = 300000000;
+    nanosleep(&nap, NULL);
+    Socket_Handle cs3 = net_connect("127.0.0.1", port3);
+    int ok3 = 0;
+    if (cs3 != -1) {
+        const char *req3 =
+            "GET /emfile HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        if (net_send_all(cs3, req3, strlen(req3)) == (long)strlen(req3)) {
+            char buf3[8192];
+            size_t got3 = 0;
+            long n3;
+            while (got3 < sizeof buf3 - 1 &&
+                   (n3 = net_recv(cs3, buf3 + got3, sizeof buf3 - got3 - 1)) > 0) {
+                got3 += (size_t)n3;
+            }
+            buf3[got3] = '\0';
+            ok3 = strstr(buf3, "HTTP/1.1 200 OK") != NULL &&
+                  strstr(buf3, "Hello, /emfile!") != NULL;
+        }
+        net_close(cs3);
+    }
+    kill(child3, SIGTERM);
+    waitpid(child3, NULL, 0);
+    net_close(srv3);
+    if (!ok3) {
+        fprintf(stderr, "server did not recover from the EMFILE storm\n");
+        net_cleanup();
+        return 1;
+    }
+
     net_cleanup();
 
     if (!ok) {

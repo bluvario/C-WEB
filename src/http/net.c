@@ -8,6 +8,7 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 typedef SOCKET raw_socket;
@@ -21,6 +22,7 @@ typedef SOCKET raw_socket;
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 typedef int raw_socket;
 #define RAW_INVALID (-1)
@@ -30,13 +32,16 @@ typedef int raw_socket;
 // consumer of net_error_string snapshot it right after a failure in the same
 // thread, so thread-local storage keeps the pointer stable without a lock
 static _Thread_local char g_error[256] = "no error yet";
+static _Thread_local int g_last_err = 0;
 
 static void set_err(const char *why)
 {
     const char *detail;
 #ifdef _WIN32
+    g_last_err = WSAGetLastError();
     detail = "see WSAGetLastError"; // TODO: FormatMessage the code
 #else
+    g_last_err = errno;
     detail = strerror(errno);
 #endif
     snprintf(g_error, sizeof(g_error), "%s: %s", why, detail);
@@ -380,4 +385,25 @@ void net_shutdown(Socket_Handle sock)
 const char *net_error_string(void)
 {
     return g_error;
+}
+
+int net_exhausted_fds(void)
+{
+#ifdef _WIN32
+    return g_last_err == WSAEMFILE;
+#else
+    return g_last_err == EMFILE;
+#endif
+}
+
+void net_pause_ms(unsigned long ms)
+{
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts = {.tv_sec = (time_t)(ms / 1000),
+                          .tv_nsec = (long)((ms % 1000) * 1000000L)};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+#endif
 }

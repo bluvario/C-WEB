@@ -61,4 +61,13 @@ void net_shutdown(Socket_Handle sock);
 // net_* call on the same thread
 const char *net_error_string(void);
 
+// true when the last failed net_* call on this thread ran the process out of
+// file descriptors (EMFILE / WSAEMFILE). the accept loop uses this to back
+// off: on fd exhaustion the kernel drops the pending connection, so the only
+// way out is to pause long enough for a worker to close a socket.
+int net_exhausted_fds(void);
+// pauses the calling thread for at least ms milliseconds, retrying when the
+// sleep is interrupted. used as the accept loop's fd-exhaustion back-off.
+void net_pause_ms(unsigned long ms);
+
 #endif
