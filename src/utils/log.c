@@ -31,23 +31,37 @@ void log_log(Log_Level level, const char *fmt, ...)
     if (level < g_level) {
         return;
     }
-    // TODO: this is a shared global, will need a mutex once the server
-    // grows a thread pool.
     FILE *out = g_out ? g_out : stderr;
 
+    // localtime is not reentrant (it returns a pointer to a shared struct
+    // tm), and the server's workers now log concurrently, so format into our
+    // own buffer on the stack
     time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
+    struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
     char stamp[32];
-    if (tm && strftime(stamp, sizeof(stamp), "%H:%M:%S", tm) == 0) {
+    if (strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm) == 0) {
         stamp[0] = '\0';
     }
 
+    // the whole line belongs to one lock so worker threads cannot stitch a
+    // prefix from one request onto a message from another
+#ifndef _WIN32
+    flockfile(out);
+#endif
     fprintf(out, "%s [%s] ", stamp, g_level_names[level]);
     va_list args;
     va_start(args, fmt);
     vfprintf(out, fmt, args);
     va_end(args);
     fprintf(out, "\n");
+#ifndef _WIN32
+    funlockfile(out);
+#endif
 }
 
 void log_set_clf(FILE *fh)

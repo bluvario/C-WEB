@@ -26,8 +26,10 @@ typedef int raw_socket;
 #define RAW_INVALID (-1)
 #endif
 
-// TODO: this scratchpad is shared, will need a real lock when threaded
-static char g_error[256] = "no error yet";
+// per-thread scratchpad: net_* calls may race on worker threads, and every
+// consumer of net_error_string snapshot it right after a failure in the same
+// thread, so thread-local storage keeps the pointer stable without a lock
+static _Thread_local char g_error[256] = "no error yet";
 
 static void set_err(const char *why)
 {

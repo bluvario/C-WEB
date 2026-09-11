@@ -2,6 +2,22 @@
 #include <string.h>
 
 #include "log.h"
+#include "thread.h"
+
+#define LOG_THREADS 8
+#define LOG_LINES 1500
+
+typedef struct {
+    int id;
+} Log_Job;
+
+static void log_worker(void *arg)
+{
+    Log_Job *j = arg;
+    for (int i = 0; i < LOG_LINES; i++) {
+        log_info("worker %d line %d", j->id, i);
+    }
+}
 
 int main(void)
 {
@@ -74,6 +90,76 @@ int main(void)
         line[strlen(line) - 1] != '\n') {
         fprintf(stderr, "access log line malformed: %s\n", line);
         return 1;
+    }
+
+    // concurrent workers must produce whole, ordered lines: the stream lock
+    // held by log_log means a line can never be a stitch of two requests
+    {
+        FILE *out = tmpfile();
+        if (!out) {
+            fprintf(stderr, "tmpfile failed for the threaded log\n");
+            return 1;
+        }
+        log_set_output(out);
+
+        Thread threads[LOG_THREADS];
+        Log_Job jobs[LOG_THREADS];
+        for (int i = 0; i < LOG_THREADS; i++) {
+            jobs[i].id = i;
+            if (thread_init(&threads[i], log_worker, &jobs[i]) != 0) {
+                fprintf(stderr, "could not spawn log worker %d\n", i);
+                return 1;
+            }
+        }
+        for (int i = 0; i < LOG_THREADS; i++) {
+            thread_join(&threads[i]);
+        }
+
+        fflush(out);
+        rewind(out);
+        int lines = 0;
+        int last_seen[LOG_THREADS];
+        int seen[LOG_THREADS];
+        for (int i = 0; i < LOG_THREADS; i++) {
+            last_seen[i] = -1;
+            seen[i] = 0;
+        }
+        char buf[512];
+        while (fgets(buf, sizeof buf, out) != NULL) {
+            lines++;
+            char *body = strstr(buf, "[INFO] ");
+            if (body == NULL) {
+                fprintf(stderr, "malformed log line: %s", buf);
+                return 1;
+            }
+            int id = -1, n = -1;
+            if (sscanf(body, "[INFO] worker %d line %d", &id, &n) != 2 ||
+                id < 0 || id >= LOG_THREADS || n < 0 || n >= LOG_LINES) {
+                fprintf(stderr, "log line stitched or malformed: %s", buf);
+                return 1;
+            }
+            if (n <= last_seen[id]) {
+                fprintf(stderr, "worker %d lines out of order: %s", id, buf);
+                return 1;
+            }
+            last_seen[id] = n;
+            seen[id]++;
+        }
+        fclose(out);
+        log_set_output(stderr);
+
+        if (lines != LOG_THREADS * LOG_LINES) {
+            fprintf(stderr, "expected %d log lines, saw %d\n",
+                    LOG_THREADS * LOG_LINES, lines);
+            return 1;
+        }
+        for (int i = 0; i < LOG_THREADS; i++) {
+            if (seen[i] != LOG_LINES) {
+                fprintf(stderr, "worker %d produced %d of %d lines\n",
+                        i, seen[i], LOG_LINES);
+                return 1;
+            }
+        }
     }
 
     printf("log ok\n");

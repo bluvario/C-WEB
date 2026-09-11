@@ -15,6 +15,10 @@ void log_set_level(Log_Level level);
 void log_set_output(FILE *out);
 
 void log_log(Log_Level level, const char *fmt, ...);
+// every log_log line is produced whole under the target stream's lock and
+// time-stamped via localtime_r/localtime_s, so worker threads can log
+// concurrently without stitching partial lines together or corrupting the
+// timestamp
 
 // a second, dedicated sink for Common Log Format access lines (--log FILE).
 // NULL (the default) makes log_clf_line a no-op. lines are written whole

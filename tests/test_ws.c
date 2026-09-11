@@ -102,7 +102,10 @@ static void echo_on_open(Http_Ws_Conn *conn, void *user_data)
     int r = http_ws_read_frame(conn, &f, buf, sizeof buf);
     if (r == 1 && f.opcode == WS_OP_TEXT) {
         *did_echo = 1;
-        http_ws_send_text(conn, (const char *)buf);
+        // echo with the frame's exact length: the payload buffer is not a
+        // NUL-terminated string, so a strlen() here would depend on whatever
+        // follows the bytes in stack memory and echo a garbage length
+        http_ws_send(conn, WS_OP_TEXT, buf, f.payload_len, true);
     }
     http_ws_send_close(conn, 1000);
 }

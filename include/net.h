@@ -55,7 +55,10 @@ void net_close(Socket_Handle sock);
 // on Linux. no-op on an already-partial fd.
 void net_shutdown(Socket_Handle sock);
 
-// human-readable reason for the last failed net_* call, for logging
+// human-readable reason for the last failed net_* call, for logging. the
+// string lives in a per-thread buffer: it is only a promise for the calling
+// thread, so snapshot it (format it into your own buffer) before any further
+// net_* call on the same thread
 const char *net_error_string(void);
 
 #endif
