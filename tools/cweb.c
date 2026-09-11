@@ -1192,7 +1192,7 @@ static int cmd_build(int argc, char **argv)
     snprintf(bin_path, sizeof bin_path, "%s/server", out_arg);
     Strbuf cc;
     strbuf_init(&cc);
-    strbuf_append_cstr(&cc, "cc -std=c11 -Wall -Wextra -I");
+    strbuf_append_cstr(&cc, "cc -std=c11 -Wall -Wextra -Werror -I");
     strbuf_append_shell_quoted(&cc, root);
     strbuf_append_cstr(&cc, "/include -I");
     strbuf_append_shell_quoted(&cc, out_arg);

@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
+CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O0 -g
 PREFIX  ?= /usr/local
 
 LIB_SRC := src/core/cweb.c src/utils/strbuf.c src/utils/xmem.c src/utils/file.c src/utils/sv.c src/utils/log.c src/utils/strmap.c src/utils/url.c src/utils/base64.c src/utils/buffer.c src/utils/thread.c src/utils/thread_pool.c src/utils/json.c src/utils/uri.c src/security/escape.c src/security/path.c src/security/headers.c src/http/http.c src/http/net.c src/http/request.c src/http/response.c src/http/server.c src/http/date.c src/http/params.c src/http/mime.c src/http/static.c src/http/negotiate.c src/http/cookie.c src/http/multipart.c src/http/auth.c src/http/sse.c src/http/http_client.c src/http/proxy.c src/http/middleware.c src/http/session.c src/http/rate_limit.c src/http/gzip.c src/http/cors.c src/http/etag.c src/http/flash.c src/http/csrf.c src/http/validate.c src/http/request_sign.c src/http/ws.c src/http/request_id.c src/utils/ip.c src/http/client_ip.c src/routing/route.c src/routing/router.c src/template/template.c src/db/db.c src/security/hmac.c
