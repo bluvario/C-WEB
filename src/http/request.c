@@ -93,6 +93,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->body_mmap = NULL;
     req->body_mmap_len = 0;
     req->body_file_path = NULL;
+    req->body_heap = NULL;
     req->headers.items = NULL;
     req->headers.count = 0;
     req->headers.capacity = 0;
@@ -268,6 +269,10 @@ void http_request_free(Http_Request *req)
     xfree((void *)req->auth_user.data);
     req->auth_user.data = NULL;
     req->auth_user.count = 0;
+    // a decompressed Content-Encoding: gzip body is heap storage the request
+    // owns (req->body borrowed from it); release it like the other owned views
+    xfree(req->body_heap);
+    req->body_heap = NULL;
     xfree(req->headers.items);
     req->headers.items = NULL;
     req->headers.count = 0;

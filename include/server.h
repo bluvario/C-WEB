@@ -16,6 +16,8 @@ typedef void (*Http_Handler_Fn)(Http_Request *req, Http_Response *res, void *use
 typedef struct {
     size_t max_body;             // request read-buffer cap, oversized asks 413
     const char *body_dir;        // temp dir for oversized bodies, NULL = 413
+    size_t max_inflated;         // decompressed-body cap for Content-Encoding:
+                                 // gzip uploads, 0 = default (128 MiB)
     unsigned long io_timeout_ms; // per-read deadline, stalled clients get 408
     size_t workers;              // accept-loop worker threads, 0 = auto
 } Http_Server_Config;

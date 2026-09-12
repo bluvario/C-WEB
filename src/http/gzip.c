@@ -112,6 +112,77 @@ int http_gzip_compress(const char *src, size_t len, Strbuf *out)
     return 0;
 }
 
+int http_gzip_decompress(const char *src, size_t len, size_t cap,
+                         unsigned char **out, size_t *out_len)
+{
+    if (cap == 0) {
+        return -2; // nothing allowed through a zero ceiling
+    }
+    z_stream z;
+    memset(&z, 0, sizeof z);
+    // windowBits 15 + 16 selects the RFC 1952 gzip wrapper (magic, header,
+    // crc32 trailer), which the response compressor emits
+    if (inflateInit2(&z, 15 + 16) != Z_OK) {
+        return -1;
+    }
+
+    // grow the output in fixed steps, halting once the ceiling is crossed
+    size_t step = cap < 65536 ? cap : 65536;
+    unsigned char *buf = xmalloc(step);
+    z.next_out = buf;
+    z.avail_out = (uInt)step;
+    size_t in_off = 0;
+    int rc = 0;
+    for (;;) {
+        if (z.avail_in == 0 && in_off < len) {
+            size_t take = len - in_off;
+            if (take > (size_t)(1u << 30)) {
+                take = 1u << 30; // keep the uInt input counters in range
+            }
+            z.next_in = (Bytef *)(uintptr_t)(src + in_off);
+            z.avail_in = (uInt)take;
+            in_off += take;
+        }
+        int ir = inflate(&z, Z_NO_FLUSH);
+        if (ir == Z_STREAM_END) {
+            break;
+        }
+        if (ir != Z_OK && ir != Z_BUF_ERROR) {
+            rc = -1; // Z_DATA_ERROR (bad bytes/crc), Z_MEM_ERROR, Z_NEED_DICT
+            break;
+        }
+        if (z.avail_out == 0) {
+            if (z.total_out >= cap) {
+                rc = -2;
+                break; // compressed bomb: the stream would pass the ceiling
+            }
+            size_t add = cap - z.total_out < step ? cap - z.total_out : step;
+            buf = xrealloc(buf, z.total_out + add);
+            z.next_out = buf + z.total_out;
+            z.avail_out = (uInt)add;
+            continue;
+        }
+        if (z.avail_in == 0 || ir == Z_BUF_ERROR) {
+            rc = -1; // input ran out before the stream ended: truncated
+            break;
+        }
+    }
+    inflateEnd(&z);
+    if (rc != 0) {
+        xfree(buf);
+        return rc;
+    }
+    if (z.total_out == 0) {
+        xfree(buf);
+        *out = NULL;
+        *out_len = 0;
+    } else {
+        *out = xrealloc(buf, z.total_out);
+        *out_len = z.total_out;
+    }
+    return 0;
+}
+
 void http_gzip_middleware(Http_Request *req, Http_Response *res,
                           void *user_data,
                           Http_Handler_Fn next, void *next_data)

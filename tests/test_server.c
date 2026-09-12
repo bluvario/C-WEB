@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "gzip.h"
 #include "log.h"
 #include "net.h"
 #include "server.h"
@@ -227,6 +228,45 @@ static char *post_expect(int port, const char *path, size_t len,
         }
         free(body);
     }
+    while (got < cap - 1 && (n = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
+// POSTs a body with an extra raw header line ("" for none) so the test can
+// claim Content-Encoding without a form layer; returns the whole response
+static char *post_with_header(int port, const char *path, const char *extra,
+                              const char *body, size_t len)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    char head[320];
+    int hl = snprintf(head, sizeof head,
+                      "POST %s HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Content-Length: %zu\r\n"
+                      "%s"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      path, len, extra);
+    char *req = malloc((size_t)hl + len);
+    memcpy(req, head, (size_t)hl);
+    memcpy(req + hl, body, len);
+    long sent = net_send_all(s, req, hl + (long)len);
+    free(req);
+    if (sent != hl + (long)len) {
+        net_close(s);
+        return NULL;
+    }
+    size_t cap = (size_t)hl + len + 4096;
+    char *buf = malloc(cap);
+    size_t got = 0;
+    long n;
     while (got < cap - 1 && (n = net_recv(s, buf + got, cap - got - 1)) > 0) {
         got += (size_t)n;
     }
@@ -645,6 +685,83 @@ int main(void)
     rmdir(spill_tmpdir2);
     if (!ok6) {
         fprintf(stderr, "Expect: 100-continue over the spill route failed\n");
+        net_cleanup();
+        return 1;
+    }
+
+    // --- Content-Encoding: gzip request bodies ---
+    // the server inflates a gzipped upload before the handler sees it, and
+    // the echo handler must return the decompressed bytes verbatim. the
+    // decompression ceiling is 4096, so a compressed bomb (7000 bytes of
+    // zeros) gets a 413 instead of ballooning a worker, and garbage with
+    // the header earns a 400.
+    Socket_Handle srv7 = net_listen(0);
+    if (srv7 == -1) {
+        fprintf(stderr, "seventh listen failed: %s\n", net_error_string());
+        net_cleanup();
+        return 1;
+    }
+    int port7 = net_bound_port(srv7);
+    Http_Server_Config cfg7;
+    memset(&cfg7, 0, sizeof cfg7);
+    cfg7.max_body = 64 * 1024;
+    cfg7.max_inflated = 4096;
+    cfg7.io_timeout_ms = 2000;
+    pid_t child7 = fork();
+    if (child7 == 0) {
+        log_set_level(LOG_WARN);
+        http_serve_config(srv7, echo_body_fn, NULL, &cfg7);
+        _exit(0);
+    }
+
+    int ok7 = 1;
+    Strbuf gz;
+    strbuf_init(&gz);
+    const char *plain = "hello gzip upload";
+    if (http_gzip_compress(plain, strlen(plain), &gz) == 0) {
+        resp = post_with_header(port7, "/gz", "Content-Encoding: gzip\r\n",
+                                gz.items, gz.count);
+        ok7 = resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+              strstr(resp, plain) != NULL &&
+              strstr(resp, "100 Continue") == NULL;
+        free(resp);
+    } else {
+        ok7 = 0;
+    }
+    strbuf_free(&gz);
+
+    static char bomb[7000];
+    memset(bomb, 0, sizeof bomb);
+    strbuf_init(&gz);
+    if (http_gzip_compress(bomb, sizeof bomb, &gz) == 0) {
+        resp = post_with_header(port7, "/bomb", "Content-Encoding: gzip\r\n",
+                                gz.items, gz.count);
+        ok7 = ok7 && resp != NULL && strstr(resp, "HTTP/1.1 413") != NULL &&
+              strstr(resp, "200 OK") == NULL;
+        free(resp);
+    } else {
+        ok7 = 0;
+    }
+    strbuf_free(&gz);
+
+    const char *trash = "this is definitely not gzip";
+    resp = post_with_header(port7, "/trash", "Content-Encoding: gzip\r\n",
+                            trash, strlen(trash));
+    ok7 = ok7 && resp != NULL && strstr(resp, "HTTP/1.1 400") != NULL;
+    free(resp);
+
+    // control: no Content-Encoding header, the body must pass through raw
+    const char *raw = "plain body";
+    resp = post_with_header(port7, "/raw", "", raw, strlen(raw));
+    ok7 = ok7 && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+          strstr(resp, raw) != NULL;
+    free(resp);
+
+    kill(child7, SIGTERM);
+    waitpid(child7, NULL, 0);
+    net_close(srv7);
+    if (!ok7) {
+        fprintf(stderr, "Content-Encoding: gzip request test failed\n");
         net_cleanup();
         return 1;
     }

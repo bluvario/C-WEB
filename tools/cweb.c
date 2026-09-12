@@ -381,6 +381,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// hardening knobs for http_serve_config(), from --max-body,\n"
         "// --io-timeout and --workers; zero keeps the library defaults\n"
         "static size_t cweb_max_body = 0;\n"
+        "static size_t cweb_max_inflated = 0;\n"
         "static unsigned long cweb_io_timeout_ms = 0;\n"
         "static size_t cweb_workers = 0;\n"
         "\n"
@@ -527,6 +528,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs("    if (cweb_max_body > 0) "
           "printf(\"max-body: %zu bytes\\n\", cweb_max_body);\n",
           f);
+    fputs("    if (cweb_max_inflated > 0) "
+          "printf(\"max-inflated: %zu bytes\\n\", cweb_max_inflated);\n",
+          f);
     fputs("    if (cweb_body_dir != NULL) "
           "printf(\"body-dir: %s\\n\", cweb_body_dir);\n",
           f);
@@ -661,6 +665,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "            cweb_static_cache = strtoul(argv[++i], NULL, 10);\n"
 "        } else if (strcmp(argv[i], \"--max-body\") == 0 && i + 1 < argc) {\n"
             "            cweb_max_body = cweb_size_arg(argv[++i]);\n"
+            "        } else if (strcmp(argv[i], \"--max-inflated\") == 0 && i + 1 < argc) {\n"
+            "            cweb_max_inflated = cweb_size_arg(argv[++i]);\n"
             "        } else if (strcmp(argv[i], \"--body-dir\") == 0 && i + 1 < argc) {\n"
             "            cweb_body_dir = argv[++i];\n"
             "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
@@ -868,6 +874,7 @@ fputs(
         "    }\n"
         "    Http_Server_Config cfg = {0};\n"
         "    cfg.max_body = cweb_max_body;\n"
+        "    cfg.max_inflated = cweb_max_inflated;\n"
         "    cfg.body_dir = cweb_body_dir;\n"
         "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
         "    cfg.workers = cweb_workers;\n"
@@ -1621,7 +1628,9 @@ static void usage(FILE *f)
           "--max-body BYTES (request size cap, 413 past it; accepts k/m/g\n"
           "suffixes like 4k or 2m) --body-dir DIR (with --max-body set, stream\n"
           "oversized bodies to temp files in DIR, mapped back and then\n"
-          "unlinked, instead of answering 413), --io-timeout MS (per-read\n"
+          "unlinked, instead of answering 413) --max-inflated BYTES (ceiling\n"
+          "a Content-Encoding: gzip request body may decompress to, 413 past\n"
+          "it; accepts k/m/g suffixes, default 128m) --io-timeout MS (per-read\n"
           "deadline, stalled\n"
           "clients get 408) and --workers N (accept-loop threads, default one\n"
 "per core), and\n"

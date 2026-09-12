@@ -48,6 +48,11 @@ typedef struct {
     size_t body_mmap_len;   // bytes mapped
     char  *body_file_path;  // heap-allocated temp path to unlink on free
 
+    // heap storage for a Content-Encoding: gzip request body after the server
+    // inflates it; req->body then borrows from here. owned by the request and
+    // released by http_request_free; NULL when the body was not decompressed.
+    void *body_heap;
+
     // caller's IP address as text, filled in by the server for the lifetime
     // of the connection; empty in hand-constructed requests. handy for
     // middleware that keys on the client, like per-IP rate limiting.

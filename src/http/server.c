@@ -19,6 +19,7 @@
 
 #include "buffer.h"
 #include "date.h"
+#include "gzip.h"
 #include "http.h"
 #include "log.h"
 #include "net.h"
@@ -402,6 +403,9 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
     // hardening knobs, zero meaning "library default"
     size_t max_body = cfg != NULL && cfg->max_body > 0 ? cfg->max_body
                                                        : REQUEST_BUFFER_CAP;
+    size_t max_inflated = cfg != NULL && cfg->max_inflated > 0
+                              ? cfg->max_inflated
+                              : HTTP_GZIP_MAX_INFLATED_DEFAULT;
     unsigned long timeout_ms = cfg != NULL && cfg->io_timeout_ms > 0
                                ? cfg->io_timeout_ms : REQUEST_TIMEOUT_MS;
 
@@ -648,6 +652,33 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
             log_warn("malformed request from client, sending 400");
             send_error(client, HTTP_400_BAD_REQUEST);
             break;
+        }
+
+        // a body that arrived Content-Encoding: gzip is inflated before the
+        // handler sees it, so routes read the real bytes as always. a stream
+        // that is not valid gzip is a 400; one that would decompress past the
+        // ceiling is a 413 (decompression-bomb backstop).
+        if (header_has_token(&req, "content-encoding", "gzip") ||
+            header_has_token(&req, "content-encoding", "x-gzip")) {
+            unsigned char *infl;
+            size_t infl_len;
+            int drc = http_gzip_decompress(req.body.data, req.body.count,
+                                           max_inflated, &infl, &infl_len);
+            if (drc == -1) {
+                log_warn("malformed gzip request body, sending 400");
+                http_request_free(&req);
+                send_error(client, HTTP_400_BAD_REQUEST);
+                break;
+            }
+            if (drc == -2) {
+                log_warn("decompressed body exceeds %zu bytes, sending 413",
+                         max_inflated);
+                http_request_free(&req);
+                send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                break;
+            }
+            req.body_heap = infl;
+            req.body = (String_View){(const char *)infl, infl_len};
         }
 
         bool keep = conn_keep_alive(&req);
