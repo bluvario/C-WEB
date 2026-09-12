@@ -1,0 +1,74 @@
+<h1>Database</h1>
+
+<p>C-WEB ships a tiny file-backed key-value store. No daemon, no connection
+string, no schema, no query language — the whole file is slurped into memory,
+mutated there, and rewritten atomically on sync. Enough to persist counters,
+settings, notes, or anything else a page wants between requests.</p>
+
+<h2>Opening it</h2>
+
+<p>Run the generated server with <code>--db app.db</code> and every page can
+reach the shared store:</p>
+
+<pre><code>&lt;?c
+  Cweb_Db *db = cweb_database();
+  if (db == NULL) {
+      http_response_set_status(res, HTTP_500_INTERNAL_SERVER_ERROR);
+      return;
+  }
+?&gt;</code></pre>
+
+<div class="note">
+  <strong>Always check for NULL.</strong> <code>cweb_database()</code> returns
+  the store only when the server ran with <code>--db</code>. Without it there
+  is no store and the accessor returns NULL.
+</div>
+
+<h2>Reading and writing</h2>
+
+<pre><code>&lt;?c
+  // write
+  cweb_db_put(db, sv_from_cstr("visits"), sv_from_cstr("42"));
+
+  // read — the view borrows from the db, valid until the next mutating call
+  String_View v = cweb_db_get(db, sv_from_cstr("visits"));
+
+  // delete
+  cweb_db_delete(db, sv_from_cstr("visits"));
+?&gt;</code></pre>
+
+<p>Every operation serializes on an internal mutex, so pages running on
+different worker threads each get a coherent view.</p>
+
+<h2>When does it hit disk?</h2>
+
+<ul>
+  <li><code>cweb_db_sync(db)</code> writes now — atomically, via a temp file
+    renamed over the path.</li>
+  <li><code>cweb_db_close(db)</code> syncs then frees.</li>
+  <li>The generated server syncs on clean shutdown.</li>
+</ul>
+
+<p>In practice pages rarely call sync: the framework decides. If you want a
+particular write durable immediately, sync it.</p>
+
+<h2>What the sessions store uses it for</h2>
+
+<p>Run with <code>--db</code> and the session store detaches persistence to the
+same file: sessions are mirrored under <code>session-&lt;token&gt;</code> keys
+as they change, and logins survive a restart. Your page data and the serialized
+sessions share one file — see <a href="/sessions">Sessions</a>.</p>
+
+<h2>Keeping it honest</h2>
+
+<p>The store is a deliberate trade: simple, embedded, atomic on sync, whole-file
+in memory. For a real relational workload — joins, indexes, concurrent writers
+across processes — put a database daemon behind a reverse proxy instead. The
+store is the persistence layer C-WEB needs, not a replacement for PostgreSQL.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/http2">HTTP/2</a> — the transport your pages ride on.</li>
+  <li><a href="/tls">HTTPS / TLS</a> — encryption for anything public.</li>
+</ul>

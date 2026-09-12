@@ -1,0 +1,123 @@
+<h1>Responses</h1>
+
+<p>The <code>Http_Response *res</code> your handler receives is empty until
+you fill it. Pages mostly just emit markup through the template tags; the
+helpers below cover everything beyond that.</p>
+
+<pre><code>typedef struct {
+    Http_Status status;       // HTTP_200_OK unless you change it
+    Strbuf headers;           // raw "Name: value" lines
+    Strbuf body;              // the payload
+} Http_Response;</code></pre>
+
+<h2>Status and headers</h2>
+
+<pre><code>&lt;?c
+  http_response_set_status(res, HTTP_201_CREATED);
+  http_response_set_header(res, "X-App-Version", "3");
+  http_response_append_header(res, "Set-Cookie", "a=1; HttpOnly");
+?&gt;</code></pre>
+
+<ul>
+  <li><code>http_response_set_header</code> replaces any existing header of the
+    same name (case-insensitive).</li>
+  <li><code>http_response_append_header</code> adds a line without touching
+    existing ones — for repeatable fields like <code>Set-Cookie</code> and
+    <code>Vary</code>.</li>
+</ul>
+
+<h2>Redirects</h2>
+
+<p>Set a <code>Location</code> and pick a code from the RFC 7231 family
+(301/302/303/307/308; anything else quietly becomes 302). The classic
+POST-then-redirect is <code>303 See Other</code>:</p>
+
+<pre><code>&lt;?c
+  http_response_redirect(res, HTTP_303_SEE_OTHER, "/notes");
+  return;
+?&gt;</code></pre>
+
+<h2>JSON</h2>
+
+<pre><code>&lt;?c
+  Json_Value obj = json_make_object();
+  json_object_set(&amp;obj, "name", json_make_string("Ada"));
+  json_object_set(&amp;obj, "active", json_make_bool(1));
+  http_response_json(res, HTTP_200_OK, obj);   // consumes and frees obj
+?&gt;</code></pre>
+
+<div class="note">
+  <strong>Note:</strong><code>http_response_json</code> sets
+  <code>Content-Type: application/json; charset=utf-8</code>, serializes the
+  tree compactly, and frees it — the value is consumed, do not touch it
+  afterwards. Parse inbound JSON with <code>json_parse</code> and read fields
+  with <code>json_get_*</code>. See <code>json.h</code> for the full picture.
+</div>
+
+<p>Already have the text? Use <code>http_response_json_raw</code>.</p>
+
+<h2>Cookies</h2>
+
+<p>Set cookies with an attribute bundle. <code>SameSite=None</code> forces
+<code>Secure</code> on, matching browser policy:</p>
+
+<pre><code>&lt;?c
+  Cookie_Attrs attrs = {
+      .path = "/", .max_age = 3600, .http_only = 1,
+      .same_site = COOKIE_SAMESITE_LAX,
+  };
+  http_response_set_cookie(res, "theme", "dark", &amp;attrs);
+?&gt;</code></pre>
+
+<h2>CORS</h2>
+
+<p>Let browser JS from a specific origin read the response, or open it wide
+with <code>*</code>. The <code>Vary: Origin</code> marker is added for you so
+shared caches keep variants apart:</p>
+
+<pre><code>&lt;?c http_response_set_cors(res, "https://app.example.com"); ?&gt;</code></pre>
+
+<p>For a preflight answer (methods, request headers, cache time):</p>
+
+<pre><code>&lt;?c http_response_set_cors_allow(res, "GET, POST", "Content-Type", 600); ?&gt;</code></pre>
+
+<h2>Security headers</h2>
+
+<p>Stamp the baseline hardening headers — <code>X-Content-Type-Options:
+nosniff</code>, <code>Referrer-Policy: no-referrer</code>, <code>X-Frame-Options:
+DENY</code> — plus a Content-Security-Policy. The generated server does this
+for the whole app with <code>--secure</code>; use these directly to control a
+single route:</p>
+
+<pre><code>&lt;?c http_response_security_headers(res, NULL); ?&gt;  &lt;!-- built-in CSP --&gt;</code></pre>
+
+<h2>Streaming</h2>
+
+<p>A response can stream a body instead of assembling it in memory. See
+<a href="/streaming">Streaming</a> for chunked output, SSE and WebSockets in
+detail. The short version for a pull-based body:</p>
+
+<pre><code>&lt;?c
+  http_response_set_stream(res, my_source, my_userdata);
+?&gt;</code></pre>
+
+<p>where <code>my_source(buf, cap, user_data)</code> fills <code>buf</code> and
+returns the byte count, or 0 when the stream is done.</p>
+
+<h2>Bodies that do not need the layout</h2>
+
+<p>When a layout wraps the app (see <a href="/pages">Pages</a>), set
+<code>res-&gt;no_layout = 1</code> to return this response naked — right for
+a JSON API or a download handler:</p>
+
+<pre><code>&lt;?c
+  http_response_json(res, HTTP_200_OK, value);
+  res-&gt;no_layout = 1;
+?&gt;</code></pre>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/streaming">Streaming</a> — SSE, WebSocket, chunked bodies.</li>
+  <li><a href="/sessions">Sessions</a> — cookies, sessions, flash and CSRF together.</li>
+</ul>

@@ -1,0 +1,277 @@
+<h1>API reference</h1>
+
+<p>Every public header is under <code>include/</code>, one per module, and the
+generated server pre-includes what a page needs. This is the full listing —
+the names matter; the comments in each header carry the details.</p>
+
+<h2>cweb.h</h2>
+<span class="api"><code>const char *cweb_version(void);</code> — the framework version string.</span>
+
+<h2>template.h</h2>
+<span class="api">
+<code>int cweb_template_to_c(String_View source, const char *fn_name, Strbuf *out, Strbuf *err);</code><br>
+<code>int cweb_template_compile(const char *path, Strbuf *out, Strbuf *err);</code><br>
+<code>void cweb_template_page_name(const char *path, char *out, size_t out_size);</code><br>
+<code>void cweb_tpl_add(Http_Response *res, const void *data, size_t len);</code><br>
+<code>void cweb_tpl_capture_begin(Http_Response *res);</code><br>
+<code>void cweb_tpl_capture_end(Http_Response *res);</code><br>
+<code>String_View cweb_tpl_layout_body(void);</code><br>
+<code>void cweb_tpl_layout_emit(Http_Response *res);</code><br>
+<code>void cweb_tpl_date(Http_Response *res, time_t t);</code><br>
+<code>void cweb_tpl_date_local(Http_Response *res, time_t t);</code><br>
+<code>void cweb_tpl_strftime(Http_Response *res, const char *fmt, time_t t);</code><br>
+<code>void cweb_tpl_now(Http_Response *res);</code>
+</span>
+
+<h2>http.h</h2>
+<span class="api">
+<code>Http_Status</code> — HTTP_200_OK ... HTTP_504_GATEWAY_TIMEOUT<br>
+<code>Http_Method</code> — HTTP_GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS<br>
+<code>const char *http_status_reason(Http_Status status);</code><br>
+<code>Http_Method http_method_from_sv(String_View name);</code><br>
+<code>const char *http_method_name(Http_Method method);</code>
+</span>
+
+<h2>request.h</h2>
+<span class="api">
+<code>struct Http_Request</code> — method, target, path, query, version, body, remote, client_ip, request_id, auth_user, headers, route_timeout_ms<br>
+<code>Http_Header_Array</code> — headers list<br>
+<code>Request_Parse_Result http_request_parse(Http_Request *req, String_View raw);</code><br>
+<code>Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, size_t *consumed);</code><br>
+<code>void http_request_parse_header_block(Http_Request *req, String_View head);</code><br>
+<code>int http_request_decode_chunked(Http_Request *req, char *raw, size_t raw_count, size_t *consumed);</code><br>
+<code>void http_request_free(Http_Request *req);</code><br>
+<code>const String_View *http_request_get_header(Http_Request *req, const char *name);</code>
+</span>
+
+<h2>response.h</h2>
+<span class="api">
+<code>struct Http_Response</code> — status, headers, body, suppress_body, keep_alive, no_layout, stream_fn, stream_chunks, upgrade_fn<br>
+<code>void http_response_init / free (Http_Response *res);</code><br>
+<code>void http_response_set_status(Http_Response *res, Http_Status status);</code><br>
+<code>void http_response_set_header(Http_Response *res, const char *name, const char *value);</code><br>
+<code>void http_response_append_header(Http_Response *res, const char *name, const char *value);</code><br>
+<code>char *http_response_get_header(Http_Response *res, const char *name);</code><br>
+<code>bool http_response_has_header(Http_Response *res, const char *name);</code><br>
+<code>void http_response_add_body(Http_Response *res, String_View data);</code><br>
+<code>void http_response_add_body_cstr(Http_Response *res, const char *text);</code><br>
+<code>void http_response_set_stream(Http_Response *res, Http_Stream_Fn fn, void *user_data);</code><br>
+<code>void http_response_stream_write(Http_Response *res, const void *data, size_t len);</code><br>
+<code>void http_response_redirect(Http_Response *res, Http_Status status, const char *location);</code><br>
+<code>void http_response_json(Http_Response *res, Http_Status status, Json_Value value);</code><br>
+<code>void http_response_json_raw(Http_Response *res, Http_Status status, const char *body);</code><br>
+<code>void http_response_set_cors / set_cors_allow (...);</code><br>
+<code>void http_response_set_cookie(Http_Response *res, const char *name, const char *value, const Cookie_Attrs *attrs);</code><br>
+<code>void http_response_serialize(Http_Response *res, Strbuf *out);</code>
+</span>
+
+<h2>server.h / net.h</h2>
+<span class="api">
+<code>void http_serve(Socket_Handle listener, Http_Handler_Fn handler, void *user_data);</code><br>
+<code>int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler, void *user_data, const Http_Server_Config *cfg);</code><br>
+<code>void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data);</code><br>
+<code>void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler, void *user_data, const Http_Server_Config *cfg);</code><br>
+<code>Http_Server_Config</code> — max_body, body_dir, max_inflated, tls_cert, tls_key, io_timeout_ms, workers<br>
+<code>int net_init(void); void net_cleanup(void);</code><br>
+<code>long net_recv / net_send_all (Socket_Handle, ...);</code><br>
+<code>int net_set_timeout / net_bound_port / net_unix_unlink (...);</code><br>
+<code>void net_close / net_shutdown (Socket_Handle);</code>
+</span>
+
+<h2>router.h / route.h</h2>
+<span class="api">
+<code>void router_init / router_free (Http_Router *r);</code><br>
+<code>int router_add(Http_Router *r, Http_Method method, const char *pattern, Http_Route_Handler handler, void *user_data);</code><br>
+<code>int router_add_timeout(..., unsigned long timeout_ms);</code><br>
+<code>int router_set_timeout(Http_Router *r, Http_Method method, const char *pattern, unsigned long timeout_ms);</code><br>
+<code>int router_remove(Http_Router *r, Http_Method method, const char *pattern, void **user_data_out);</code><br>
+<code>void router_dispatch(Http_Request *req, Http_Response *res, void *user_data);</code><br>
+<code>bool route_path_matches(const char *pattern, String_View path, Str_Map *params);</code>
+</span>
+
+<h2>static.h</h2>
+<span class="api">
+<code>void http_serve_static(Http_Request *req, Http_Response *res, void *user_data);</code><br>
+<code>void http_static_set_cache(unsigned long max_age);</code><br>
+<code>int http_static_mount(Http_Router *r, const char *url_prefix, const char *fs_root);</code><br>
+<code>int http_static_unmount(Http_Router *r, const char *url_prefix);</code>
+</span>
+
+<h2>session.h</h2>
+<span class="api">
+<code>void http_session_store_init(Http_Session_Store *s, time_t default_ttl);</code><br>
+<code>void http_session_store_free(Http_Session_Store *s);</code><br>
+<code>void http_session_store_set_db(Http_Session_Store *s, Cweb_Db *db);</code><br>
+<code>void http_session_store_dump(Http_Session_Store *s);</code><br>
+<code>char *http_session_create(Http_Session_Store *s, time_t ttl);</code><br>
+<code>Http_Session *http_session_open(Http_Session_Store *s, const char *token);</code><br>
+<code>void http_session_set(Http_Session *sesh, const char *key, const char *value);</code><br>
+<code>const char *http_session_value(Http_Session *sesh, const char *key);</code><br>
+<code>int http_session_del(Http_Session *sesh, const char *key);</code><br>
+<code>void http_session_destroy(Http_Session_Store *s, const char *token);</code><br>
+<code>void http_session_reap(Http_Session_Store *s);</code><br>
+<code>Http_Session *http_session_from_cookie(Http_Session_Store *s, Http_Request *req, const char *cookie_name);</code><br>
+<code>void http_session_issue_cookie(Http_Response *res, const char *cookie_name, const char *token, const Cookie_Attrs *attrs);</code>
+</span>
+
+<h2>flash.h / csrf.h</h2>
+<span class="api">
+<code>void http_flash_set(Http_Session *sesh, const char *key, const char *message);</code><br>
+<code>char *http_flash_get(Http_Session *sesh, const char *key);</code><br>
+<code>size_t http_flash_render(Http_Response *res, Http_Session *sesh);</code><br>
+<code>const char *http_csrf_token(Http_Session *sesh);</code><br>
+<code>const char *http_csrf_rotate(Http_Session *sesh);</code><br>
+<code>void http_csrf_field(Http_Response *res, Http_Session *sesh);</code><br>
+<code>int http_csrf_verify(Str_Map *params, Http_Session *sesh);</code><br>
+<code>void http_csrf_reject(Http_Response *res, const char *retry_url);</code>
+</span>
+
+<h2>middleware.h</h2>
+<span class="api">
+<code>int http_middleware_add(Http_Middleware_Chain *c, Http_Middleware_Fn fn, void *user_data);</code><br>
+<code>Http_Handler_Fn http_middleware_build(Http_Middleware_Chain *c, Http_Handler_Fn final_handler, void *final_user_data, void **handler_data);</code><br>
+<code>void http_middleware_free(Http_Middleware_Chain *c);</code><br>
+<code>void http_middleware_data_free(void *handler_data);</code><br>
+<code>void http_access_log_middleware(Http_Request *, Http_Response *, void *, Http_Handler_Fn, void *);</code>
+</span>
+
+<h2>security.h / validate.h</h2>
+<span class="api">
+<code>void http_response_security_headers(Http_Response *res, const char *csp);</code><br>
+<code>void http_response_security_headers_opts(Http_Response *res, const Http_Security_Options *opts);</code><br>
+<code>void http_security_middleware(...);</code><br>
+<code>void http_form_init / required / length / email / int (...);</code><br>
+<code>int http_form_ok(const Http_Form *f);</code><br>
+<code>const char *http_form_error(const Http_Form *f);</code><br>
+<code>void http_form_value(Http_Response *res, Str_Map *params, const char *field);</code>
+</span>
+
+<h2>rate_limit.h / gzip.h / cors.h / etag.h</h2>
+<span class="api">
+<code>void http_rate_limiter_init(Http_RateLimiter *rl, double rate, double burst);</code><br>
+<code>int http_rate_limiter_allow(Http_RateLimiter *rl, String_View key);</code><br>
+<code>void http_rate_limiter_status(const Http_RateLimiter *rl, String_View key, Http_Rate_Status *out);</code><br>
+<code>void http_rate_limit_middleware(...);</code><br>
+<code>int http_gzip_compress(const char *src, size_t len, Strbuf *out);</code><br>
+<code>int http_gzip_decompress(const char *src, size_t len, size_t cap, unsigned char **out, size_t *out_len);</code><br>
+<code>void http_gzip_middleware(...);</code><br>
+<code>void http_cors_middleware(...);</code><br>
+<code>void http_etag_middleware(...);</code>
+</span>
+
+<h2>auth.h / request_sign.h / request_id.h / client_ip.h / ip.h</h2>
+<span class="api">
+<code>int http_basic_auth_parse(String_View authorization, char *user, size_t user_size, char *pass, size_t pass_size);</code><br>
+<code>void http_response_require_basic_auth(Http_Response *res, const char *realm);</code><br>
+<code>void http_basic_auth_middleware(...);</code><br>
+<code>void http_request_signature_compute(...); int http_request_signature_verify(Http_Request *req, const char *secret, ...);</code><br>
+<code>void http_signature_middleware(...);</code><br>
+<code>void http_request_id_middleware(...);</code><br>
+<code>void http_client_ip_middleware(...);</code><br>
+<code>int http_cidr_parse(Http_Cidr *out, const char *text);</code><br>
+<code>int http_cidr_contains(const Http_Cidr *c, String_View ip);</code>
+</span>
+
+<h2>db.h</h2>
+<span class="api">
+<code>int cweb_db_open(Cweb_Db *db, const char *path);</code><br>
+<code>void cweb_db_close(Cweb_Db *db);</code><br>
+<code>String_View cweb_db_get(Cweb_Db *db, String_View key);</code><br>
+<code>int cweb_db_put(Cweb_Db *db, String_View key, String_View value);</code><br>
+<code>int cweb_db_delete(Cweb_Db *db, String_View key);</code><br>
+<code>int cweb_db_sync(Cweb_Db *db);</code>
+</span>
+
+<h2>sse.h / ws.h</h2>
+<span class="api">
+<code>void http_response_start_sse(Http_Response *res, Http_Sse_Produce produce, void *user_data);</code><br>
+<code>size_t sse_frame(Strbuf *out, String_View data, const char *event, const char *id, int retry_ms);</code><br>
+<code>int http_ws_upgrade(Http_Request *req, Http_Response *res, Http_Ws_On_Open on_open, void *user_data);</code><br>
+<code>int http_ws_read_frame(Http_Ws_Conn *conn, Http_Ws_Frame *frame, uint8_t *payload, size_t payload_cap);</code><br>
+<code>int http_ws_send(Http_Ws_Conn *conn, uint8_t opcode, const uint8_t *payload, size_t len, bool fin);</code><br>
+<code>int http_ws_send_text / send_close / send_pong (...);</code><br>
+<code>int http_ws_loop(Http_Ws_Conn *conn, Http_Ws_On_Message on_message, void *user_data, uint8_t *buf, size_t buf_cap);</code>
+</span>
+
+<h2>http_client.h / proxy.h</h2>
+<span class="api">
+<code>int http_client_req(Http_Client *c, const char *url_or_path, Http_Method method, const char *extra_headers, String_View body, Http_Client_Result *out);</code><br>
+<code>int http_client_get(const char *url, Http_Client_Result *out) / http_client_post(const char *url, String_View body, Http_Client_Result *out);</code><br>
+<code>void http_client_result_free(Http_Client_Result *out);</code><br>
+<code>int http_proxy_mount(Http_Router *r, const char *url_prefix, const char *upstream_base);</code><br>
+<code>void http_reverse_proxy(Http_Request *req, Http_Response *res, void *user_data);</code><br>
+<code>void http_proxy_unmount(Http_Router *r, const char *url_prefix);</code>
+</span>
+
+<h2>json.h</h2>
+<span class="api">
+<code>Json_Parse_Result json_parse(String_View src);</code><br>
+<code>const Json_Value *json_get(const Json_Value *obj, const char *name);</code><br>
+<code>const char *json_get_string / double json_get_number / bool json_get_bool (...);</code><br>
+<code>Json_Value json_make_null/bool/number/string/array/object(...);</code><br>
+<code>void json_array_append / json_object_set (...);</code><br>
+<code>void json_serialize / json_serialize_pretty (const Json_Value *v, Strbuf *out, int spaces);</code><br>
+<code>void json_free_value(Json_Value *v);</code>
+</span>
+
+<h2>params.h / multipart.h / cookie.h</h2>
+<span class="api">
+<code>int params_parse_into(Str_Map *m, String_View encoded);</code><br>
+<code>int request_merge_params(Http_Request *req, Str_Map *out);</code><br>
+<code>int multipart_boundary(String_View content_type_value, char *out, size_t out_sz);</code><br>
+<code>int multipart_parse(Multipart *m, String_View body, const char *boundary);</code><br>
+<code>int multipart_save(const Multipart_Part *part, const char *dir, char *out_path, size_t out_sz);</code><br>
+<code>void multipart_free(Multipart *m);</code><br>
+<code>void http_cookie_parse(Str_Map *jar, String_View header);</code><br>
+<code>void http_response_set_cookie(Http_Response *res, const char *name, const char *value, const Cookie_Attrs *attrs);</code>
+</span>
+
+<h2>strmap.h / sv.h / strbuf.h / buffer.h / url.h / uri.h</h2>
+<span class="api">
+<code>void strmap_init / strmap_free (Str_Map *m);</code><br>
+<code>const char *strmap_get(Str_Map *m, String_View key) / strmap_get_cstr(Str_Map *m, const char *key);</code><br>
+<code>int strmap_set(Str_Map *m, String_View key, String_View value);</code><br>
+<code>void strmap_delete(Str_Map *m, String_View key);</code><br>
+<code>String_View sv_from_cstr(const char *s);</code> + pieces: sv_trim, sv_equal, sv_starts_with, sv_consume_prefix, sv_chop_by_delim, sv_to_i64, sv_count_char<br>
+<code>int strbuf_append / append_cstr / append_char / null_terminate (...);</code><br>
+<code>String_View rb_view / rb_write_head (Read_Buffer *b);</code><br>
+<code>void rb_init / rb_free / rb_commit / rb_discard (...);</code><br>
+<code>int url_decode_into(Strbuf *sb, String_View src) / void url_encode_into(Strbuf *sb, String_View src);</code><br>
+<code>int uri_parse(String_View text, Uri *out) / uri_default_port / uri_scheme_is (...);</code>
+</span>
+
+<h2>json support and small utilities</h2>
+<span class="api">
+<code>void html_escape_into(Strbuf *sb, String_View src);</code> — escape.h<br>
+<code>char *file_read_all(const char *path, char **out, size_t *out_len);</code> — file.h<br>
+<code>void base64_encode_into / int base64_decode_into (...);</code> — base64.h<br>
+<code>void sha256(...) / hmac_sha256(...) / hmac_sha256_hex(...) / secure_byte_equal(...);</code> — hmac.h<br>
+<code>char *http_date_rfc7231/time_t http_date_parse/time_mono_ms(...);</code> — date.h<br>
+<code>int thread_init / thread_join / thread_detach / thread_hardware_parallelism (...);</code> — thread.h<br>
+<code>void *xmalloc/xcalloc/xrealloc, xfree(void*)</code> — xmem.h
+</span>
+
+<h2>h2.h / hpack.h</h2>
+<span class="api">
+<code>#define H2_MAGIC "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"</code><br>
+<code>void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data, const Http_Server_Config *cfg, Read_Buffer *rb, size_t consumed, Http_Request *upgrade_req, String_View remote, unsigned long default_timeout_ms);</code><br>
+<code>bool h2_is_upgrade_request(const Http_Request *req);</code><br>
+<code>void hpack_init / hpack_free / hpack_set_max_table_size / hpack_decode_block / hpack_encode_status / hpack_encode_field (...);</code>
+</span>
+
+<h2>tls.h</h2>
+<span class="api">
+<code>int tls_available(void);</code><br>
+<code>void *tls_server_ctx_new(const char *cert, const char *key, char *err, size_t errsz);</code><br>
+<code>int tls_self_signed_pem(const char *cn, const char **extra_dns, long days, char *err, size_t errsz, char **cert_pem, char **key_pem);</code><br>
+<code>int tls_self_signed_paths(const char *dir, const char *name, char *cert_out, size_t certsz, char *key_out, size_t keysz, int *created, char *err, size_t errsz);</code><br>
+<code>int tls_cert_file_sha256(const char *cert_path, char *out, size_t outsz);</code><br>
+<code>void *tls_accept_client(void *ctx, int fd); long tls_recv(...); long tls_send_all(...); void tls_close(...);</code>
+</span>
+
+<h2>Hand-written servers</h2>
+
+<p>Nothing forces the page-file convention. A <code>main.c</code> can assemble
+any of this by hand — a router, a session store, a middleware chain — and hand
+it to <code>http_serve</code>. The generated server is just one composition of
+the library, chosen for the common case, not the only one.</p>

@@ -311,6 +311,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include <stdlib.h>\n"
             "#include <string.h>\n"
             "#include <time.h>\n\n"
+            "#include \"cweb.h\"\n"
             "#include \"escape.h\"\n"
             "#include \"validate.h\"\n"
             "#include \"csrf.h\"\n"

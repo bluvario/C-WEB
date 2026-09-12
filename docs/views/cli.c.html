@@ -1,0 +1,79 @@
+<h1>The cweb CLI</h1>
+
+<p><code>build/cweb</code> is the framework's command-line driver. It turns a
+directory of <code>.c.html</code> pages into a native server, scaffolds new
+apps, and runs servers with live reload.</p>
+
+<h2>Commands</h2>
+
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td><code>cweb build VIEWS OUT [ROOT [STATIC]]</code></td><td>Compile every page under <code>VIEWS</code> into C, emit <code>OUT/main.c</code> and link <code>OUT/server</code>.</td></tr>
+  <tr><td><code>cweb serve [--watch] VIEWS [PORT [ROOT [STATIC]]] [FLAGS...]</code></td><td>Build into a scratch dir and run it. With <code>--watch</code>, rebuild and restart on any file change.</td></tr>
+  <tr><td><code>cweb new APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial and a stylesheet.</td></tr>
+  <tr><td><code>cweb version</code></td><td>Print the framework version.</td></tr>
+</table>
+
+<p><code>ROOT</code> (default <code>.</code>) is the cweb checkout holding
+<code>include/</code> and <code>build/libcweb.a</code>. When the given path
+does not hold an <code>include/</code> dir, the tool walks up to the nearest
+ancestor that does — so <code>cweb serve views 8080 . static</code> works from
+inside an app directory next to the checkout.</p>
+
+<h2>How pages map to routes</h2>
+
+<ul>
+  <li><code>views/hello.c.html</code> → route <code>/hello</code>.</li>
+  <li><code>views/sub/world.c.html</code> → route <code>/sub/world</code>.</li>
+  <li><code>views/index.c.html</code> → <code>/index</code> and the root <code>/</code>.</li>
+  <li><code>views/404.c.html</code> → not a route; it becomes the app's custom not-found page.</li>
+  <li><code>views/layout.c.html</code> → the document shell that wraps every page.</li>
+  <li><code>views/partials/*.c.html</code> → compiled and declared in <code>pages.h</code> but never routed; pages render them as fragments.</li>
+</ul>
+
+<p>Every route answers <strong>GET and POST</strong> with the same handler, so
+a form posts right back to the page that rendered it. See
+<a href="/routing">Routing</a> for the full rules.</p>
+
+<h2>Server flags</h2>
+
+<p>The built <code>OUT/server</code> binary accepts these flags. <code>cweb
+serve</code> passes anything after the positional arguments straight through,
+so both paths honor the same options.</p>
+
+<table>
+  <tr><th>Flag</th><th>What it does</th></tr>
+  <tr><td><code>--port N</code></td><td>Listen port, default 8080.</td></tr>
+  <tr><td><code>--rate N</code></td><td>Per-address budget of N requests a minute (429 past it).</td></tr>
+  <tr><td><code>--secure</code></td><td>Hardening headers on every response.</td></tr>
+  <tr><td><code>--gzip</code></td><td>Compress compressible response bodies.</td></tr>
+  <tr><td><code>--db PATH</code></td><td>Open the file-backed key/value store at PATH, exposed to pages via <code>cweb_database()</code>. Sessions persist to it too.</td></tr>
+  <tr><td><code>--static-cache SECONDS</code></td><td>Cache-Control max-age on static files; ETag/Last-Modified still answer 304.</td></tr>
+  <tr><td><code>--etag</code></td><td>Strong ETag (SHA-256) on every dynamic response; matching If-None-Match gets 304.</td></tr>
+  <tr><td><code>--request-id</code></td><td>Stamp every response (and <code>req->request_id</code>) with a unique trace id.</td></tr>
+  <tr><td><code>--request-id-inherit</code></td><td>Also echo an inbound X-Request-Id from a trusted proxy.</td></tr>
+  <tr><td><code>--basic-auth USER:PASS</code></td><td>Lock the app behind HTTP Basic auth.</td></tr>
+  <tr><td><code>--trusted-proxy CIDR[,CIDR...]</code></td><td>Believe X-Forwarded-For only from reverse proxies in these networks.</td></tr>
+  <tr><td><code>--max-body BYTES</code></td><td>Request size cap, 413 past it; accepts k/m/g suffixes like <code>4k</code>.</td></tr>
+  <tr><td><code>--body-dir DIR</code></td><td>With <code>--max-body</code>, spill oversized bodies to temp files in DIR instead of 413.</td></tr>
+  <tr><td><code>--max-inflated BYTES</code></td><td>Ceiling for a gzip request body after decompression (default 128m).</td></tr>
+  <tr><td><code>--tls</code></td><td>Serve HTTPS with a self-signed cert minted under <code>~/.cweb</code> and reused after.</td></tr>
+  <tr><td><code>--tls-cert FILE --tls-key FILE</code></td><td>Serve HTTPS with your PEM chain and private key.</td></tr>
+  <tr><td><code>--io-timeout MS</code></td><td>Per-read deadline; stalled clients get 408.</td></tr>
+  <tr><td><code>--workers N</code></td><td>Accept-loop worker threads; default is one per core.</td></tr>
+  <tr><td><code>--signature-secret SECRET</code></td><td>Require an HMAC-SHA256 request signature; anything else gets 403.</td></tr>
+  <tr><td><code>--socket PATH</code></td><td>Also serve the app on a unix socket at PATH (alongside the TCP port).</td></tr>
+  <tr><td><code>--cors ORIGIN</code></td><td>Answer CORS preflights and stamp Access-Control-Allow-Origin. <code>*</code> opens it to any origin.</td></tr>
+  <tr><td><code>--csp POLICY</code></td><td>Content-Security-Policy on every response, replacing the built-in default.</td></tr>
+  <tr><td><code>--csp-report-only POLICY</code></td><td>A monitoring-only policy alongside the main one.</td></tr>
+  <tr><td><code>--log FILE</code></td><td>Append Common Log Format access lines to FILE.</td></tr>
+  <tr><td><code>--route-timeout PATH MS</code></td><td>Give one route a per-request timeout (504 instead of 408 on a stall); repeat for more routes.</td></tr>
+  <tr><td><code>--routes</code></td><td>Print the route table and flags, then exit.</td></tr>
+</table>
+
+<div class="note">
+  <strong>Note:</strong> everything these flags configure is also available
+  directly through the library (router, session store, middleware chain), so a
+  hand-written <code>main.c</code> can reproduce any of it. The generated
+  server just mirrors the common setup in one line-flag form.
+</div>

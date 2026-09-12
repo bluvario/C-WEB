@@ -1,0 +1,119 @@
+<h1>Sessions</h1>
+
+<p>Sessions put state on the server and hand the client an opaque token. The
+client can point the token at a session but can never read or forge its
+contents — the right primitive when almost anything else would let a visitor
+tamper.</p>
+
+<h2>The store</h2>
+
+<p>Every page in a generated app receives the shared session store as
+<code>user_data</code>:</p>
+
+<pre><code>&lt;?c
+  Http_Session_Store *store = (Http_Session_Store *)user_data;
+  Http_Session *sesh = http_session_from_cookie(store, req, "app_session");
+?&gt;</code></pre>
+
+<p><code>http_session_from_cookie</code> reads the named cookie, resolves it to
+a live session, and returns NULL when the cookie is missing or stale. That is
+the "load who is talking" step — call it at the top of every page that cares.</p>
+
+<h2>Creating a session</h2>
+
+<p>Sessions are created lazily, when a visitor logs in or shows a preference.
+Create one and issue its cookie in the same breath:</p>
+
+<pre><code>&lt;?c
+  Http_Session_Store *store = (Http_Session_Store *)user_data;
+  const char *token = http_session_create(store, -1);   // -1: store default TTL
+  http_session_issue_cookie(res, "app_session", token, NULL);
+?&gt;</code></pre>
+
+<p>The store was initialized with a default TTL (an hour of inactivity in the
+generated server); pass explicit seconds or <code>-1</code> for the default,
+or <code>0</code> for a session that never expires.</p>
+
+<h2>Reading and writing</h2>
+
+<pre><code>&lt;?c
+  http_session_set(sesh, "username", "ada");
+  const char *name = http_session_value(sesh, "username");
+?&gt;
+&lt;p&gt;Logged in as &lt;?h= sv_from_cstr(name != NULL ? name : "nobody") ?&gt;&lt;/p&gt;</code></pre>
+
+<p>Every session handle is server-side storage; the cookie only names it.
+Destroy a session (a logout) with <code>http_session_destroy(store, token)</code>.</p>
+
+<h2>Persistence</h2>
+
+<p>Run the server with <code>--db app.db</code> and the store mirrors every
+session to the file-backed database: creates and every <code>set()</code> are
+written immediately, missing sessions are loaded back on demand, and logouts
+remove their record. Logins survive a restart as long as the same db file is
+passed again.</p>
+
+<h2>Flash messages</h2>
+
+<p>A one-shot notice that survives a redirect: the POST stores it, the next
+GET renders it once. Flash values live under reserved <code>flash:</code> keys,
+so they can never collide with your data. Every call is a safe no-op when
+<code>sesh</code> is NULL, so an anonymous visitor can hit a page that renders
+flash without crashing.</p>
+
+<pre><code>&lt;?c
+  // in the POST handler, before redirecting:
+  http_flash_set(sesh, "ok", "Note saved.");
+
+  // in the GET handler, wherever the notice should appear:
+  http_flash_render(res, sesh);   // emits &lt;div class="flash"&gt;...&lt;/div&gt;
+?&gt;</code></pre>
+
+<p>Read a single flash value with <code>http_flash_get</code> if you want to
+render it yourself.</p>
+
+<h2>CSRF protection</h2>
+
+<p>Forms that mutate state should carry a per-session token so a cross-site
+request can never forge a POST. The flow:</p>
+
+<pre><code>&lt;form method="post"&gt;
+  &lt;?c http_csrf_field(res, sesh); ?&gt;
+  &lt;button&gt;Delete&lt;/button&gt;
+&lt;/form&gt;</code></pre>
+
+<pre><code>&lt;?c
+  if (http_csrf_verify(params, sesh) != 0) {
+      http_csrf_reject(res, "/");   // 403 + a retry link
+      return;
+  }
+?&gt;</code></pre>
+
+<p>Rotate the token the moment a login succeeds
+(<code>http_csrf_rotate(sesh)</code>) so a token planted before authentication
+cannot be reused against the fresh session.</p>
+
+<div class="warn">
+  <strong>Do not skip this.</strong> A session cookie plus any body-changing
+  form is exactly what CSRF attacks are built on. The token costs two lines.
+  Best practice: rotate on login, verify on every mutating POST.
+</div>
+
+<h2>Basic auth (the simple version)</h2>
+
+<p>For a whole-app gate, HTTP Basic auth beats building a login page — the
+generated server's <code>--basic-auth USER:PASS</code> guards everything and
+fills <code>req-&gt;auth_user</code> for you. The comparison runs on constant-time
+SHA-256 digests, so a timing side channel cannot leak how much of a guess was
+right:</p>
+
+<pre><code>&lt;?c if (req-&gt;auth_user.count != 0) { ?&gt;
+  &lt;p&gt;Hello &lt;?h= req-&gt;auth_user ?&gt;&lt;/p&gt;
+&lt;?c } ?&gt;</code></pre>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/middleware">Middleware</a> — rate limits, gzip, harder headers.</li>
+  <li><a href="/database">Database</a> — the store sessions persist to.</li>
+</ul>

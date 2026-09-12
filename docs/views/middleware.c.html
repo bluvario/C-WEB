@@ -1,0 +1,84 @@
+<h1>Middleware</h1>
+
+<p>Middleware runs <em>around</em> the request handler: it may inspect or
+modify the request, let the rest of the chain run, then inspect or modify the
+response on the way out. A chain is the framework's way of applying cross-cutting
+concerns — hardening, throttling, compression, logging — to every request without
+touching the handlers.</p>
+
+<h2>The chain</h2>
+
+<p>Through the library, a chain is assembled and then used as the top-level
+handler:</p>
+
+<pre><code>Http_Middleware_Chain chain;
+http_middleware_init(&amp;chain);
+http_middleware_add(&amp;chain, http_security_middleware, NULL);
+http_middleware_add(&amp;chain, http_rate_limit_middleware, &amp;limiter);
+http_middleware_add(&amp;chain, http_gzip_middleware, NULL);
+
+Http_Handler_Fn dispatch =
+    http_middleware_build(&amp;chain, router_dispatch, &amp;r, &amp;chain_data);
+Http_Server_Config cfg = {0};
+http_serve(listener, dispatch, chain_data);</code></pre>
+
+<p>Middlewares run in the order added. The returned handler is
+<code>fn(req, res, handler_data)</code>; forfeit it with
+<code>http_middleware_data_free</code> when the server stops.</p>
+
+<h2>Built-in middleware</h2>
+
+<p>The generated server mounts these with a one-word flag, which is the
+easiest way to use them. The library forms are there when you hand-build.</p>
+
+<table>
+  <tr><th>Middleware</th><th>Flag</th><th>What it does</th></tr>
+  <tr><td><code>http_security_middleware</code></td><td><code>--secure</code></td><td>Stamp <code>nosniff</code>, <code>no-referrer</code>, <code>DENY</code> and a Content-Security-Policy (<code>default-src 'self'</code> by default) on every response.</td></tr>
+  <tr><td><code>http_rate_limit_middleware</code></td><td><code>--rate N</code></td><td>Token-bucket: up to N requests a minute per caller, 429 when the bucket empties.</td></tr>
+  <tr><td><code>http_gzip_middleware</code></td><td><code>--gzip</code></td><td>Compress compressible bodies over a size threshold; the client decides with Accept-Encoding.</td></tr>
+  <tr><td><code>http_etag_middleware</code></td><td><code>--etag</code></td><td>SHA-256 the body into a strong ETag; a matching If-None-Match gets a 304 with no payload.</td></tr>
+  <tr><td><code>http_basic_auth_middleware</code></td><td><code>--basic-auth U:P</code></td><td>Require HTTP Basic credentials; 401 + challenge otherwise. Works from a SHA-256 digest, compared in constant time.</td></tr>
+  <tr><td><code>http_signature_middleware</code></td><td><code>--signature-secret S</code></td><td>Require an HMAC-SHA256 signature over the request; 403 otherwise. For trusting another proxy.</td></tr>
+  <tr><td><code>http_request_id_middleware</code></td><td><code>--request-id</code></td><td>Stamp each response (and <code>req-&gt;request_id</code>) with a unique trace id.</td></tr>
+  <tr><td><code>http_client_ip_middleware</code></td><td><code>--trusted-proxy CIDR</code></td><td>Resolve the real client from X-Forwarded-For, but only when the request arrived from a trusted proxy network — so logs and rate buckets name the client, not the proxy.</td></tr>
+  <tr><td><code>http_cors_middleware</code></td><td><code>--cors ORIGIN</code></td><td>Answer preflights and stamp Access-Control-Allow-Origin on matching requests.</td></tr>
+  <tr><td><code>http_access_log_middleware</code></td><td><code>--log FILE</code></td><td>One Common Log Format line per completed request, naming the real client and echoing the request id when one exists.</td></tr>
+</table>
+
+<h2>Ordering matters</h2>
+
+<p>The generated server composes the chain in a deliberate order (outermost
+first): trusted-proxy resolution, request-id, security headers, request
+signature, rate budget, basic-auth guard, gzip, etag, CORS. The point of a few
+of those choices:</p>
+
+<ul>
+  <li>The <strong>rate budget sits outside basic auth</strong>, keyed by the
+    account the request names — so brute-forcing one account is throttled
+    however many IPs the attacker spreads across, instead of rerolling the
+    bucket on every try.</li>
+  <li><strong>client-ip runs outermost</strong>, so access logs and the
+    per-address buckets below it see the real client, never the proxy.</li>
+  <li><strong>request-id runs outermost</strong>, so even a short-circuited
+    chain still carries the trace id.</li>
+  <li><strong>gzip runs outside etag</strong> because the ETag hashes the
+    <em>uncompressed</em> body for a stable validator across encodings.</li>
+</ul>
+
+<p>When you override a policy role with flags like <code>--csp</code> or
+<code>--cors</code>, only that knob changes — the ordering stays.</p>
+
+<h2>When to skip the chain</h2>
+
+<p>A middleware chain is the right tool for cross-cutting behavior. For
+one-route concerns — a single admin endpoint, a handler that wants no layout —
+do it in the handler instead: <code>http_basic_auth_middleware</code> wraps one
+handler, <code>http_response_security_headers</code> stamps one response,
+<code>res-&gt;no_layout</code> skips the wrapper.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/streaming">Streaming</a> — long-lived responses the chain wraps.</li>
+  <li><a href="/http2">HTTP/2</a> — the transport underneath.</li>
+</ul>

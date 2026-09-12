@@ -1,0 +1,83 @@
+<h1>HTTP/2</h1>
+
+<p>C-WEB serves HTTP/2 over cleartext — <strong>h2c</strong> for short — as a
+peer of HTTP/1.1, decided per connection. No separate port, no ALPN dance: a
+client that speaks h2c gets h2c, a client that does not stays on 1.1.</p>
+
+<h2>How it is negotiated over cleartext</h2>
+
+<p>There are exactly two h2c entry points (RFC 7540 §3.2), and the server
+handles both:</p>
+
+<ul>
+  <li><strong>Prior knowledge.</strong> The client connects and immediately
+    sends the 24-byte connection preface —
+    <code>PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n</code> — then frames. The server
+    recognizes the magic bytes and speaks h2 from the first byte.</li>
+  <li><strong>Upgrade.</strong> The client sends a normal HTTP/1.1 GET that
+    announces the switch in its headers —
+    <code>Connection: Upgrade, HTTP2-Settings</code> and
+    <code>Upgrade: h2c</code>. The server answers 101 and both sides continue
+    in h2.</li>
+</ul>
+
+<div class="note">
+  <strong>Note:</strong> over TLS, HTTP/2 is negotiated by ALPN instead and
+  happens automatically when OpenSSL is present. h2c is the cleartext flavor;
+  the same framing code path does both.
+</div>
+
+<h2>What you get for free</h2>
+
+<ul>
+  <li>Multiplexed streams over one connection — no more head-of-line blocking
+    between requests.</li>
+  <li>HPACK header compression, Huffman-coded, with the dynamic table really
+    maintained (RFC 7541), not stubbed.</li>
+  <li>The normal request pipeline: your page handlers see an
+    <code>Http_Request</code> exactly like a 1.1 request, so templates,
+    sessions, middleware and streaming all work unchanged.</li>
+  <li>Flow control, per-stream and per-connection, with orderly
+    GOAWAY shutdown.</li>
+</ul>
+
+<h2>Streams and your handler</h2>
+
+<p>Concurrent streams are transparently multiplexed over the socket. The
+framework's own limits:</p>
+
+<ul>
+  <li>Up to <code>H2_MAX_CONCURRENT_STREAMS</code> (100) open streams; beyond
+    that, new streams are refused with RST_STREAM(REFUSED_STREAM) rather than
+    queued.</li>
+  <li>Bodies respect the same <code>--max-body</code> / <code>--body-dir</code>
+    semantics as HTTP/1.1, including the spill-to-disk path.</li>
+</ul>
+
+<h2>Is my framework using h2c?</h2>
+
+<p>curl speaks prior-knowledge h2c out of the box:</p>
+
+<pre><code>curl --http2-prior-knowledge http://localhost:8080/</code></pre>
+
+<p>Or force an h2c upgrade over a 1.1 request:</p>
+
+<pre><code>curl --http2 http://localhost:8080/</code></pre>
+
+<p>Check a response's <code>HTTP/2.0 200</code> status line to confirm which
+protocol answered.</p>
+
+<h2>Inside the server</h2>
+
+<p>The h2 layer is <code>src/http/h2.c</code> and
+<code>src/http/hpack.c</code> — framing, HPACK, multiplexing and GOAWAY. It
+lives in the library like everything else, so a hand-written server can serve
+h2 by calling <code>h2_serve</code> directly if it ever needs to bypass the
+top-level connection loop.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/tls">HTTPS / TLS</a> — serve the same app encrypted.</li>
+  <li><a href="/api">API reference</a> — the h2 and hpack headers.</li>
+</ul>

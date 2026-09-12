@@ -1,0 +1,91 @@
+<h1>Getting started</h1>
+
+<p>You need a C11 compiler, <code>make</code>, <code>ar</code>, and zlib.
+OpenSSL is optional and enables HTTPS.</p>
+
+<h2>Build the framework</h2>
+
+<pre><code>make</code></pre>
+
+<p>That produces two things:</p>
+
+<ul>
+  <li><code>build/libcweb.a</code> — the whole framework as one static library.</li>
+  <li><code>build/cweb</code> — the command-line tool that builds and serves apps.</li>
+</ul>
+
+<p>Run the test suite once, it is fast:</p>
+
+<pre><code>make test</code></pre>
+
+<h2>Scaffold your first app</h2>
+
+<pre><code>./build/cweb new hello
+cd hello</code></pre>
+
+<p>This creates a runnable skeleton:</p>
+
+<pre><code>hello/
+  views/
+    index.c.html          the home page (answers GET and POST)
+    404.c.html            custom not-found page
+    layout.c.html         document shell wrapping every page
+    partials/footer.c.html  a fragment only pages render
+  static/
+    style.css             served from the /* mount</code></pre>
+
+<h2>Serve it</h2>
+
+<pre><code>../build/cweb serve views 8080 . static</code></pre>
+
+<p>Point a browser at <code>http://localhost:8080</code>. Now edit
+<code>views/index.c.html</code> and refresh — that is the whole loop. The
+template is recompiled on every request, so there is no build step while
+you work on a page.</p>
+
+<div class="note">
+  <strong>Note:</strong> <code>cweb serve</code> runs the generated
+  <code>server</code> binary. The compile happens once at startup (or on
+  each change in <code>--watch</code> mode), not per page hit.
+</div>
+
+<h2>Watch mode</h2>
+
+<p>Add <code>--watch</code> and the tool rebuilds and restarts the server
+whenever a template or static file changes, so a long-running app picks up
+your edits without you touching anything:</p>
+
+<pre><code>../build/cweb serve --watch views 8080 . static</code></pre>
+
+<h2>Build a production binary</h2>
+
+<p>When you are done editing, compile the app into a deployable binary.
+The layout, pages and partials are compiled into it — nothing needs to be
+shipped except the binary (plus your static dir, if you keep it separate):</p>
+
+<pre><code>../build/cweb build views out . static
+./out/server --port 8080 --db app.db --secure</code></pre>
+
+<p>The generated server accepts a long list of flags; see
+<a href="/cli">The cweb CLI</a> for every one of them.</p>
+
+<h2>The example apps</h2>
+
+<p>Two working apps ship in <code>examples/</code>. Build them and read them
+— they double as documentation:</p>
+
+<pre><code>make examples</code></pre>
+
+<ul>
+  <li><code>examples/login</code> — session cookies, a form, a logout route,
+    and a tiny auth flow you can copy.</li>
+  <li><code>examples/notes</code> — a real notes app: layout wrapper, a
+    <code>--db</code> store, form handling, and static assets.</li>
+</ul>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/pages">Pages and templates</a> — the <code>.c.html</code> language.</li>
+  <li><a href="/cli">The cweb CLI</a> — commands and server flags.</li>
+</ul>

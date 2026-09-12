@@ -1,0 +1,138 @@
+<h1>Requests</h1>
+
+<p>Every page handler receives an <code>Http_Request *req</code> describing
+the incoming request. Here is the shape of it:</p>
+
+<pre><code>typedef struct {
+    Http_Method method;       // HTTP_GET, HTTP_POST, ...
+    String_View target;       // raw target, query included
+    String_View path;         // target without the query string
+    String_View query;        // query string without the leading '?'
+    String_View version;      // "HTTP/1.1" etc.
+    String_View body;         // request body bytes
+    String_View remote;       // peer address (the proxy's, behind one)
+    String_View client_ip;    // real client, after trusted-proxy resolution
+    String_View request_id;   // trace id, when the request-id middleware ran
+    String_View auth_user;    // username, after Basic auth succeeded
+    Http_Header_Array headers;
+} Http_Request;</code></pre>
+
+<h2>Method</h2>
+
+<p>Compare against the constants in <code>http.h</code>:
+<code>HTTP_GET</code>, <code>HTTP_POST</code>, <code>HTTP_PUT</code>,
+<code>HTTP_DELETE</code>, <code>HTTP_PATCH</code>, <code>HTTP_HEAD</code>,
+<code>HTTP_OPTIONS</code>.</p>
+
+<pre><code>&lt;?c if (req-&gt;method == HTTP_POST) { ?&gt;
+  &lt;p&gt;Form submitted.&lt;/p&gt;
+&lt;?c } else { ?&gt;
+  &lt;p&gt;Just rendering.&lt;/p&gt;
+&lt;?c } ?&gt;</code></pre>
+
+<h2>Params: query strings, forms and route captures</h2>
+
+<p>The generated route handlers merge <strong>query string</strong> and
+<strong>form fields</strong> (both <code>application/x-www-form-urlencoded</code>
+and <code>multipart/form-data</code>) into <code>params</code>. Route captures
+(see <a href="/routing">Routing</a>) are added last, so they win on a name
+clash.</p>
+
+<pre><code>&lt;?c
+  const char *q  = strmap_get_cstr(params, "q");            // ?q=...
+  const char *id = strmap_get_cstr(params, "id");           // /notes/&lt;id&gt;
+  if (q == NULL) q = "";
+?&gt;
+&lt;p&gt;You searched for &lt;?h= sv_from_cstr(q) ?&gt;&lt;/p&gt;</code></pre>
+
+<p>By hand, and for anything params did not surface, use
+<code>request_merge_params(req, &amp;map)</code> or parse the body yourself.
+Reading a raw header is case-insensitive:</p>
+
+<pre><code>&lt;?c
+  const String_View *ua = http_request_get_header(req, "User-Agent");
+?&gt;
+&lt;?c if (ua != NULL) { ?&gt;
+  &lt;p&gt;Your browser: &lt;?h= *ua ?&gt;&lt;/p&gt;
+&lt;?c } else { ?&gt;
+  &lt;p&gt;Unknown browser.&lt;/p&gt;
+&lt;?c } ?&gt;</code></pre>
+
+<h2>Bodies</h2>
+
+<p><code>req-&gt;body</code> is a <code>String_View</code> over the raw body
+bytes. For a JSON API, parse it with the JSON helpers; for form data, the
+params merge usually already did the work. When the server has a
+<code>--body-dir</code>, oversized bodies are spilled to disk and mapped back,
+so <code>req-&gt;body</code> behaves the same whatever the size.</p>
+
+<p>If the body advertised <code>Content-Encoding: gzip</code>, the server
+inflates it up to the <code>--max-inflated</code> ceiling before your handler
+runs, and <code>req-&gt;body</code> points at the decompressed bytes.</p>
+
+<h2>Multipart uploads</h2>
+
+<p>File parts of a multipart form are <em>not</em> merged into params; you get
+them with <code>multipart_parse</code> and save them with
+<code>multipart_save</code>:</p>
+
+<pre><code>&lt;?c
+  Multipart m;
+  multipart_parse(&amp;m, req-&gt;body, boundary);
+  for (size_t i = 0; i &lt; m.count; i++) {
+      if (m.parts[i].filename.count != 0) {
+          char path[512];
+          multipart_save(&amp;m.parts[i], "./uploads", path, sizeof path);
+      }
+  }
+  multipart_free(&amp;m);
+?&gt;</code></pre>
+
+<p>The boundary comes from the <code>Content-Type</code> header via
+<code>multipart_boundary</code>.</p>
+
+<h2>Cookies</h2>
+
+<p>Parse the <code>Cookie</code> header into a <code>Str_Map</code> jar:</p>
+
+<pre><code>&lt;?c
+  Str_Map jar;
+  strmap_init(&amp;jar);
+  const String_View *ck = http_request_get_header(req, "Cookie");
+  if (ck != NULL) http_cookie_parse(&amp;jar, *ck);
+  const char *theme = strmap_get_cstr(&amp;jar, "theme");
+  strmap_free(&amp;jar);
+?&gt;</code></pre>
+
+<div class="note">
+  <strong>Prefer sessions over raw cookies</strong> for anything you trust:
+  a session token cookie only names a server-side bag, the client can never
+  read or forge the data in it. See <a href="/sessions">Sessions</a>.
+</div>
+
+<h2>Validation</h2>
+
+<p>Form values arrive as strings; validating them is a common enough chore
+that the framework ships a small helper (<code>validate.h</code>):</p>
+
+<pre><code>&lt;?c
+  Http_Form f;
+  http_form_init(&amp;f);
+  http_form_required(&amp;f, params, "title", "Title");
+  http_form_int(&amp;f, params, "age", "Age", 0, 150, NULL);
+  if (http_form_ok(&amp;f)) {
+      &lt;!-- everything passed --&gt;
+  } else {
+      http_flash_set(sesh, "error", http_form_error(&amp;f));
+  }
+?&gt;</code></pre>
+
+<p><code>http_form_value</code> re-renders a field's submitted value into the
+response so a failed form does not wipe the user's input.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/responses">Responses</a> — building the answer.</li>
+  <li><a href="/routing">Routing</a> — how params and captures work.</li>
+</ul>

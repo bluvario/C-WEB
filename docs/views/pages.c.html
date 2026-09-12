@@ -1,0 +1,156 @@
+<h1>Pages and templates</h1>
+
+<p>A page is a plain HTML file with C code spliced in. The framework compiles
+it into a function — <code>static void page_xxx(Http_Request *req,
+Http_Response *res, Str_Map *params, void *user_data)</code> — that gets
+registered with the router. The <code>.c.html</code> extension marks the file
+for compilation; the <code>.html</code> part is what you actually read.</p>
+
+<h2>The three tags</h2>
+
+<table>
+  <tr><th>Tag</th><th>Meaning</th></tr>
+  <tr><td><code>&lt;?c ... ?&gt;</code></td><td>Raw C statements, executed as-is. <code>req</code>, <code>res</code>, <code>params</code> and <code>user_data</code> are in scope, plus stdio/stdlib/string/stdint.</td></tr>
+  <tr><td><code>&lt;?c= expr ?&gt;</code></td><td>Append <code>expr</code> to the body as-is; <code>expr</code> must be a <code>const char *</code>.</td></tr>
+  <tr><td><code>&lt;?h= expr ?&gt;</code></td><td>Append <code>html_escape_into(res-&gt;body, expr)</code>; <code>expr</code> is a <code>String_View</code>.</td></tr>
+</table>
+
+<p>Everything outside the tags is output verbatim, in order. The generated
+handler sets <code>Content-Type: text/html</code> before any of the above
+runs.</p>
+
+<h2>A page that uses them all</h2>
+
+<pre><code>&lt;h1&gt;Hello&lt;/h1&gt;
+
+&lt;?c
+  const char *name = strmap_get_cstr(params, "name");
+  if (name == NULL) name = "stranger";
+  int n = 3;
+?&gt;
+
+&lt;p&gt;Hi &lt;?h= sv_from_cstr(name) ?&gt;&lt;/p&gt;
+
+&lt;?c for (int i = 0; i &lt; n; i++) { ?&gt;
+  &lt;p&gt;Number &lt;?c= sv_from_cstr("one") ?&gt;&lt;/p&gt;
+&lt;?c } ?&gt;</code></pre>
+
+<div class="warn">
+  <strong>Escape user input.</strong> <code>&lt;?c= ... ?&gt;</code> does not
+  escape anything. Any value that came from a request — form fields, query
+  strings, database contents — must go through <code>&lt;?h= ... ?&gt;</code>
+  so HTML metacharacters cannot be injected. The rule of thumb: your own
+  constants can use <code>&lt;?c=</code>; everything else gets
+  <code>&lt;?h=</code>.
+</div>
+
+<h2>What is in scope</h2>
+
+<ul>
+  <li><code>req</code> — the parsed <code>Http_Request</code> (method, path, headers, body… see <a href="/requests">Requests</a>).</li>
+  <li><code>res</code> — the <code>Http_Response</code> you are building (see <a href="/responses">Responses</a>).</li>
+  <li><code>params</code> — the route captures and merged form/query params (see <a href="/routing">Routing</a>).</li>
+  <li><code>user_data</code> — for generated apps, the shared <code>Http_Session_Store</code>.</li>
+</ul>
+
+<p>The compiler also pre-includes the frameworks' headers, so the strings
+(<code>strmap_*</code>, <code>sv_*</code>), escaping, validation, flash,
+CSRF, sessions, params and template helpers are all available without you
+adding an <code>#include</code>.</p>
+
+<h2>Reading params</h2>
+
+<p>Query string, form fields, and route captures all land in <code>params</code>
+(route captures last, so they win). Read them with <code>strmap_get_cstr</code>:</p>
+
+<pre><code>&lt;?c
+  const char *note = strmap_get_cstr(params, "note");
+  const char *id   = strmap_get_cstr(params, "id");   // from a &lt;id&gt; capture
+?&gt;
+&lt;p&gt;Note: &lt;?h= sv_from_cstr(note != NULL ? note : "") ?&gt;&lt;/p&gt;</code></pre>
+
+<h2>Layouts</h2>
+
+<p>A <code>views/layout.c.html</code> page is a convention: it is compiled
+like a page but never routed. Instead, when present it wraps every other
+page. The page renders into a per-thread capture, then the layout runs and
+draws its body with that markup spliced into the middle:</p>
+
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;&lt;title&gt;My site&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+  &lt;header&gt;...&lt;/header&gt;
+  &lt;main&gt;
+    &lt;?c cweb_tpl_layout_emit(res); ?&gt;
+  &lt;/main&gt;
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<p>One layout per app; it shapes every page including the 404 page. Escape
+hatch: a page can set <code>res-&gt;no_layout = 1</code> to render itself
+without the wrapper.</p>
+
+<h2>Partials</h2>
+
+<p>Files under <code>views/partials/</code> are compiled and declared in the
+generated <code>pages.h</code> but never routed. Any page can render one as a
+fragment by calling it like a function:</p>
+
+<pre><code>&lt;?c page_footer(req, res, params, user_data); ?&gt;</code></pre>
+
+<p>The function name comes from the file: <code>views/partials/footer.c.html</code>
+becomes <code>page_footer</code>.</p>
+
+<h2>Time helpers</h2>
+
+<p>Timestamps want more than raw arithmetic. The template helpers render them
+and append to the response directly — they are plain text, so use them via
+<code>&lt;?c ... ?&gt;</code>, not <code>&lt;?c= ... ?&gt;</code>:</p>
+
+<pre><code>&lt;?c cweb_tpl_date_local(res, last_seen); ?&gt;  &lt;!-- 2026-09-12 09:30:00 --&gt;
+&lt;?c cweb_tpl_now(res); ?&gt;                     &lt;!-- local now stamp --&gt;
+&lt;?c cweb_tpl_strftime(res, "%Y-%m-%d", t); ?&gt; &lt;!-- arbitrary strftime --&gt;
+&lt;?c cweb_tpl_date(res, t); ?&gt;                 &lt;!-- RFC 7231, GMT --&gt;</code></pre>
+
+<h2>Handling POST</h2>
+
+<p>Every route handles GET and POST. To tell them apart, examine
+<code>req-&gt;method</code> and, for a form POST, read the merged params. A
+full round-trip — render a form, handle the POST, flash a message, redirect —
+looks like:</p>
+
+<pre><code>&lt;?c
+  Http_Session_Store *store = (Http_Session_Store *)user_data;
+  Http_Session *sesh = http_session_from_cookie(store, req, "app_session");
+  if (req-&gt;method == HTTP_POST) {
+      const char *name = strmap_get_cstr(params, "name");
+      if (name == NULL || name[0] == '\0') {
+          http_flash_set(sesh, "error", "A name is required.");
+      } else {
+          http_session_issue_cookie(res, "app_session",
+                                    http_session_create(store, -1), NULL);
+          http_flash_set(sesh, "ok", "Saved.");
+          http_response_redirect(res, HTTP_303_SEE_OTHER, "/");
+          return;
+      }
+  }
+?&gt;
+
+&lt;?c size_t shown = http_flash_render(res, sesh); ?&gt;
+
+&lt;form method="post"&gt;
+  &lt;input name="name"&gt;
+  &lt;button&gt;Save&lt;/button&gt;
+&lt;/form&gt;</code></pre>
+
+<p>See <a href="/sessions">Sessions</a> for the session, flash and CSRF
+machinery in detail.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/requests">Requests</a> — what <code>req</code> carries.</li>
+  <li><a href="/responses">Responses</a> — building the answer.</li>
+  <li><a href="/routing">Routing</a> — how pages become routes.</li>
+</ul>

@@ -1,0 +1,106 @@
+<h1>Streaming</h1>
+
+<p>Three ways to push bytes to a client over time, from simplest to most
+involved.</p>
+
+<h2>Chunked streaming</h2>
+
+<p>Pick a function that fills a buffer with the next chunk of body. The server
+chunks the output — you never touch the socket:</p>
+
+<pre><code>static size_t feed_progress(void *buf, size_t cap, void *ud)
+{
+    Progress *p = ud;
+    if (p-&gt;done) return 0;              // 0 = stream finished
+    size_t n = snprintf(buf, cap, "tick %zu\n", p-&gt;tick++);
+    return n;
+}</code></pre>
+
+<pre><code>&lt;?c
+  http_response_set_stream(res, feed_progress, &amp;prog);
+?&gt;</code></pre>
+
+<p>Alternatively queue chunks directly from the handler — the server drains
+them in chunked framing after the handler returns:</p>
+
+<pre><code>&lt;?c
+  http_response_stream_write_cstr(res, "part one; ");
+  http_response_stream_write_cstr(res, "part two");
+?&gt;</code></pre>
+
+<h2>Server-Sent Events (SSE)</h2>
+
+<p>One HTTP connection, a stream of text events, automatic reconnect by the
+browser. Build events into a buffer with <code>sse_frame</code>, then hand a
+producer to the response:</p>
+
+<pre><code>static size_t feed_events(void *buf, size_t cap, void *ud)
+{
+    Strbuf frame;
+    strbuf_init(&amp;frame);
+    // write one event per call; time or wait as needed in a real impl
+    sse_frame(&amp;frame, sv_from_cstr("{\"h\":1}"), NULL, NULL, 0);
+    size_t n = frame.count &gt; cap ? cap : frame.count;
+    memcpy(buf, frame.items, n);
+    strbuf_free(&amp;frame);
+    return n;
+}</code></pre>
+
+<pre><code>&lt;?c
+  http_response_start_sse(res, feed_events, NULL);
+?&gt;</code></pre>
+
+<p>The client sees plain <code>data: ...</code> lines plus a blank separator,
+exactly per the SSE spec.</p>
+
+<h2>WebSocket</h2>
+
+<p>For bidirectional traffic, upgrade a handler to a live socket. The pattern:
+your page (or a route) calls <code>http_ws_upgrade</code> into the response,
+and the server replies 101 and hands the raw connection to your callback:</p>
+
+<pre><code>static void on_open(Http_Ws_Conn *conn, void *ud)
+{
+    uint8_t buf[4096];
+    Http_Ws_Frame frame;
+    while (http_ws_read_frame(conn, &amp;frame, buf, sizeof buf) &gt; 0) {
+        if (frame.opcode == WS_OP_TEXT) {
+            http_ws_send_text(conn, "echo: ");
+            http_ws_send(conn, WS_OP_CONT, buf, frame.payload_len, 1);
+        }
+    }
+    http_ws_send_close(conn, 1000);   // clean shutdown code
+}</code></pre>
+
+<pre><code>&lt;?c
+  if (http_ws_upgrade(req, res, on_open, NULL) != 0) {
+      http_response_set_status(res, HTTP_400_BAD_REQUEST);
+  }
+?&gt;</code></pre>
+
+<p>The upgrade only succeeds on a genuine WebSocket handshake (GET,
+<code>Upgrade: websocket</code>, <code>Sec-WebSocket-Version: 13</code>). A
+convenience loop, <code>http_ws_loop</code>, reads frames for you, answers
+PING with PONG and CLOSE with a close answer, and calls your message callback
+for the rest.</p>
+
+<ul>
+  <li><code>http_ws_send_text</code> — one convenience call for text frames.</li>
+  <li><code>http_ws_send_pong</code> — answer a liveness probe.</li>
+  <li>Frames: <code>WS_OP_TEXT</code>, <code>WS_OP_BIN</code>,
+    <code>WS_OP_PING</code>, <code>WS_OP_PONG</code>, <code>WS_OP_CLOSE</code>.</li>
+</ul>
+
+<h2>Refreshing the client</h2>
+
+<p>The browser side is your choice. A plain script of
+<code>new EventSource('/events')</code> is all SSE needs; WebSockets use
+<code>new WebSocket('ws://...')</code>. Helpers exist server-side only — this
+framework is a backend, not a frontend.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/http2">HTTP/2</a> — what the server speaks underneath.</li>
+  <li><a href="/tls">HTTPS / TLS</a> — put a lock on the transport.</li>
+</ul>

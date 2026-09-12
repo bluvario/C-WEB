@@ -47,7 +47,14 @@ build/examples/login/server: build/cweb $(wildcard examples/login/views/*.c.html
 build/examples/notes/server: build/cweb $(wildcard examples/notes/views/*.c.html) $(wildcard examples/notes/views/partials/*.c.html) $(wildcard examples/notes/static/*)
 	./build/cweb build examples/notes/views build/examples/notes . examples/notes/static
 
-examples: build/examples/login/server build/examples/notes/server
+# the docs are a C-WEB app themselves; build them with the framework
+build/docs/server: build/cweb $(wildcard docs/views/*.c.html) $(wildcard docs/views/partials/*.c.html) $(wildcard docs/static/*)
+	./build/cweb build docs/views build/docs . docs/static
+
+docs: build/docs/server
+	@echo "serve it with:     ./build/docs/server --port 8080 [--secure --gzip ...]"
+
+examples: build/examples/login/server build/examples/notes/server build/docs/server
 	@./build/examples/login/server --routes
 	@echo "run it with:       ./build/examples/login/server --port 8080"
 	@./build/examples/notes/server --routes

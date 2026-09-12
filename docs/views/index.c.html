@@ -1,0 +1,58 @@
+<div class="hero">
+  <div class="kicker">Web framework · C11 · no runtime</div>
+  <h1>C-WEB</h1>
+  <p>
+    C-WEB is a web framework where the backend is written in C, embedded
+    directly in your HTML files. A `.c.html` page mixes markup and C code;
+    the framework compiles those files into a native server binary with a
+    built-in HTTP stack, HTTP/2 (h2c), TLS, WebSocket, SSE, sessions,
+    middleware and a file-backed database. No interpreter, no dynamic
+    language, no runtime to deploy — just one binary.
+  </p>
+  <p>
+    Version <code><?c= cweb_version() ?></code>.
+  </p>
+</div>
+
+<h2>What a page looks like</h2>
+
+<p>A page is HTML with C spliced in between <code>&lt;?c ... ?&gt;</code> tags. Everything outside the tags is output verbatim; the C inside decides what gets printed.</p>
+
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;title&gt;My site&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;?c for (int i = 0; i &lt; 5; i++) { ?&gt;
+  &lt;p&gt;Hello number &lt;?c= sv_from_cstr(count[i]) ?&gt;&lt;/p&gt;
+&lt;?c } ?&gt;
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<div class="note">
+  <strong>Note:</strong> every page answers <strong>GET and POST</strong>
+  with the same handler, so a form posts straight back to the page that
+  rendered it. Check <code>req-&gt;method</code> to tell them apart.
+</div>
+
+<h2>What you get out of the box</h2>
+
+<ul>
+  <li><strong>The cweb CLI</strong> — scaffold, build and serve an app with three commands.</li>
+  <li><strong>Templates</strong> — layout wrapping, partials, HTML escaping, date helpers.</li>
+  <li><strong>HTTP stack</strong> — keep-alive, chunked bodies, streaming, HTTP/2 cleartext, TLS.</li>
+  <li><strong>Router</strong> — <code>&lt;name&gt;</code> captures, a catch-all 404, per-route timeouts.</li>
+  <li><strong>Sessions</strong> — server-side store, flash messages, CSRF protection.</li>
+  <li><strong>Middleware</strong> — security headers, rate limiting, gzip, ETags, CORS, request signing.</li>
+  <li><strong>WebSocket and SSE</strong> — both protocols supported, no third-party server.</li>
+  <li><strong>A database</strong> — a tiny file-backed key-value store, no daemon needed.</li>
+</ul>
+
+<h2>Next steps</h2>
+
+<ul>
+  <li><a href="/getting-started">Getting started</a> — build the framework and run your first app.</li>
+  <li><a href="/cli">The cweb CLI</a> — every command and server flag.</li>
+  <li><a href="/pages">Pages and templates</a> — the <code>.c.html</code> language in detail.</li>
+</ul>

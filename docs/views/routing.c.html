@@ -1,0 +1,96 @@
+<h1>Routing</h1>
+
+<p>Every page file becomes a route. The mapping is mechanical, so there is no
+separate route table to keep in sync.</p>
+
+<h2>How views become routes</h2>
+
+<table>
+  <tr><th>File</th><th>Route</th></tr>
+  <tr><td><code>views/index.c.html</code></td><td><code>/index</code> and <code>/</code></td></tr>
+  <tr><td><code>views/hello.c.html</code></td><td><code>/hello</code></td></tr>
+  <tr><td><code>views/admin/users.c.html</code></td><td><code>/admin/users</code></td></tr>
+  <tr><td><code>views/404.c.html</code></td><td>not a route — the not-found page</td></tr>
+  <tr><td><code>views/layout.c.html</code></td><td>not a route — the wrapping layout</td></tr>
+  <tr><td><code>views/partials/*.c.html</code></td><td>never routed — fragments only</td></tr>
+</table>
+
+<p>Every route is registered for <strong>GET and POST</strong>. The handler is
+the same either way, so a page branches on <code>req-&gt;method</code> (see
+<a href="/requests">Requests</a>).</p>
+
+<h2>Not-found handling</h2>
+
+<p>Anything no route claims falls to the <code>views/404.c.html</code> page,
+answered with a 404 status. When a static dir is mounted it gets first refusal
+before the 404 page runs, so missing files still hit your custom 404.</p>
+
+<p>There is always a 404 answer even without a 404 page file.</p>
+
+<h2>Static files</h2>
+
+<p>Pass a <code>static/</code> dir to <code>cweb build</code> / <code>cweb
+serve</code> and it is mounted at <code>/*</code> behind the pages — any path
+no page claims is served from disk with the right Content-Type. A
+<code>--static-cache N</code> flag stamps <code>Cache-Control: max-age=N</code>
+on them, and ETag / Last-Modified validators answer <code>304</code> for you.</p>
+
+<pre><code>cweb build views out . static
+./out/server --port 8080 --static-cache 3600</code></pre>
+
+<h2>Route captures</h2>
+
+<p>When you hand-wire a router in a <code>main.c</code> (instead of going
+through the page-file convention), patterns may contain <code>&lt;name&gt;</code>
+captures. They match one path segment and land in <code>params</code> under
+their name:</p>
+
+<pre><code>router_add(&amp;r, HTTP_GET, "/notes/&lt;id&gt;", show_note, NULL);
+router_add(&amp;r, HTTP_GET, "/users/&lt;user&gt;/books", list_books, NULL);</code></pre>
+
+<p>Captures are raw path segments — percent-encoding is not decoded for you, so
+decode them with <code>url_decode_into</code> before trusting them. The router
+is intentionally spartan: a terminal <code>*</code> pattern matches anything
+(that is how the generated 404 fallback is wired), and the first match wins, in
+registration order.</p>
+
+<div class="note">
+  <strong>Captures in page files?</strong> The page-file convention routes each
+  file to its own exact path, so captured routes are a hand-written
+  <code>main.c</code> feature. The generated server is one router with the
+  page routes registered in sorted order, then the static mount, then the 404
+  fallback.
+</div>
+
+<h2>Per-route timeouts</h2>
+
+<p>The generated server sets a default read deadline (default 408 on a stall).
+Give a specific route its own budget with
+<code>--route-timeout /path/to/route 5000</code> (5 seconds in milliseconds).
+In a hand-written router, use <code>router_add_timeout</code> or
+<code>router_set_timeout</code>.</p>
+
+<h2>Putting it all together by hand</h2>
+
+<p>The library router (<code>router.h</code>) is a small, plain object. A
+hand-built app wires one up directly:</p>
+
+<pre><code>Http_Router r;
+router_init(&amp;r);
+router_add(&amp;r, HTTP_GET, "/", home_page, &amp;store);
+router_add(&amp;r, HTTP_GET, "/style.css", static_css, NULL);
+router_add(&amp;r, HTTP_GET, "*", not_found_page, NULL);
+
+Http_Server_Config cfg = {0};
+http_serve(listener, router_dispatch, &amp;r);</code></pre>
+
+<p><code>router_dispatch</code> is an <code>Http_Handler_Fn</code>, so it drops
+straight into <code>http_serve</code>/<code>http_serve_config</code>, or into a
+middleware chain (see <a href="/middleware">Middleware</a>).</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/middleware">Middleware</a> — wrapping every response.</li>
+  <li><a href="/http2">HTTP/2</a> — what the server speaks and when.</li>
+</ul>

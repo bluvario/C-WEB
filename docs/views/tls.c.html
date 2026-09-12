@@ -1,0 +1,77 @@
+<h1>HTTPS / TLS</h1>
+
+<p>HTTPS is optional and additive. The framework builds and serves plaintext
+even when OpenSSL is absent; when the library is present (pkg-config finds it),
+the same generated server gains <code>--tls</code>, <code>--tls-cert</code> and
+<code>--tls-key</code>, and the module <code>src/http/tls.c</code> joins the
+build.</p>
+
+<h2>Requirement</h2>
+
+<p>OpenSSL <em>headers and library</em>, found through pkg-config. If you
+already built without it, just re-run <code>make</code> after installing it —
+the build picks it up automatically and test_tls joins the suite.</p>
+
+<h2>HTTPS in one flag</h2>
+
+<p>The easiest path: <code>--tls</code>. The first run mints a self-signed RSA
+certificate under <code>~/.cweb</code> and reuses it on every later start, so
+the certificate's thumbprint stays stable across restarts:</p>
+
+<pre><code>./out/server --port 8443 --tls
+# cweb: HTTPS on 0.0.0.0:8443 (self-signed, cert under ~/.cweb)</code></pre>
+
+<p>Connect with curl's trust-on-first-use mode against the literal key, or
+just accept the warning on a throwaway host:</p>
+
+<pre><code>curl -k https://localhost:8443/</code></pre>
+
+<div class="note">
+  <strong>Trust on first use.</strong> The server prints its certificate
+  fingerprint; pin it the first time and reject changes afterwards. Self-signed
+  is fine for internal services and testing. For a public endpoint, use your
+  own cert (below).
+</div>
+
+<h2>Your own certificate</h2>
+
+<p>Two flags take a PEM chain and its private key:</p>
+
+<pre><code>./out/server --port 8443 \
+  --tls-cert /etc/letsencrypt/live/example.com/fullchain.pem \
+  --tls-key  /etc/letsencrypt/live/example.com/privkey.pem</code></pre>
+
+<p>When <code>--tls-cert</code>/<code>--tls-key</code> are set, the whole
+listener serves HTTPS and plaintext requests to that port are rejected —
+generated servers do not silently downgrade.</p>
+
+<h2>Behind a reverse proxy</h2>
+
+<p>Terminate TLS at nginx, Caddy, or whatever fronts the server, and let the
+proxy talk to C-WEB over a unix socket or localhost. See
+<code>--socket PATH</code> to expose the app on a local socket file, and
+<code>--trusted-proxy</code> so the real client address (X-Forwarded-For) is
+believed only when the request arrived from one of your proxy networks. That
+combination — TLS at the edge, plaintext on a socket, trusted proxy for IPs —
+is the recommended production shape.</p>
+
+<h2>HTTP/2 over TLS</h2>
+
+<p>With OpenSSL serving HTTPS, HTTP/2 is negotiated via ALPN transparently.
+Modern browsers speak h2 to the TLS port automatically; the h2c path is what
+cleartext clients use. See <a href="/http2">HTTP/2</a>.</p>
+
+<h2>Inside the server</h2>
+
+<p>The transport is a thin layer over the same connection loop
+(<code>tls.h</code>): accept, wrap, read via <code>tls_recv</code>, write via
+<code>tls_send_all</code>. Handlers don't know or care whether the bytes
+traveled encrypted — templates, sessions, middleware and streaming behave
+identically.</p>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/http2">HTTP/2</a> — the multiplexing transport.</li>
+  <li><a href="/api">API reference</a> — the tls module.</li>
+</ul>

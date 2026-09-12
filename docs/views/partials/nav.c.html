@@ -1,0 +1,28 @@
+<?c
+  const char *p = req->path.data != NULL ? req->path.data : "";
+  size_t plen = req->path.count;
+  const char *cls = "active";
+?>
+<h2>Start</h2>
+<a href="/" class="<?c= (plen == 1 && strncmp(p, "/", 1) == 0) ? cls : "" ?>"<?c= (plen == 1 && strncmp(p, "/", 1) == 0) ? " aria-current=\"page\"" : "" ?>>Overview</a>
+<a href="/getting-started" class="<?c= (plen == 15 && strncmp(p, "/getting-started", 15) == 0) ? cls : "" ?>"<?c= (plen == 15 && strncmp(p, "/getting-started", 15) == 0) ? " aria-current=\"page\"" : "" ?>>Getting started</a>
+<a href="/cli" class="<?c= (plen == 4 && strncmp(p, "/cli", 4) == 0) ? cls : "" ?>"<?c= (plen == 4 && strncmp(p, "/cli", 4) == 0) ? " aria-current=\"page\"" : "" ?>>The cweb CLI</a>
+
+<h2>The language</h2>
+<a href="/pages" class="<?c= (plen == 6 && strncmp(p, "/pages", 6) == 0) ? cls : "" ?>"<?c= (plen == 6 && strncmp(p, "/pages", 6) == 0) ? " aria-current=\"page\"" : "" ?>>Pages and templates</a>
+<a href="/requests" class="<?c= (plen == 9 && strncmp(p, "/requests", 9) == 0) ? cls : "" ?>"<?c= (plen == 9 && strncmp(p, "/requests", 9) == 0) ? " aria-current=\"page\"" : "" ?>>Requests</a>
+<a href="/responses" class="<?c= (plen == 10 && strncmp(p, "/responses", 10) == 0) ? cls : "" ?>"<?c= (plen == 10 && strncmp(p, "/responses", 10) == 0) ? " aria-current=\"page\"" : "" ?>>Responses</a>
+<a href="/routing" class="<?c= (plen == 8 && strncmp(p, "/routing", 8) == 0) ? cls : "" ?>"<?c= (plen == 8 && strncmp(p, "/routing", 8) == 0) ? " aria-current=\"page\"" : "" ?>>Routing</a>
+
+<h2>Features</h2>
+<a href="/sessions" class="<?c= (plen == 9 && strncmp(p, "/sessions", 9) == 0) ? cls : "" ?>"<?c= (plen == 9 && strncmp(p, "/sessions", 9) == 0) ? " aria-current=\"page\"" : "" ?>>Sessions</a>
+<a href="/middleware" class="<?c= (plen == 11 && strncmp(p, "/middleware", 11) == 0) ? cls : "" ?>"<?c= (plen == 11 && strncmp(p, "/middleware", 11) == 0) ? " aria-current=\"page\"" : "" ?>>Middleware</a>
+<a href="/streaming" class="<?c= (plen == 10 && strncmp(p, "/streaming", 10) == 0) ? cls : "" ?>"<?c= (plen == 10 && strncmp(p, "/streaming", 10) == 0) ? " aria-current=\"page\"" : "" ?>>Streaming</a>
+<a href="/database" class="<?c= (plen == 9 && strncmp(p, "/database", 9) == 0) ? cls : "" ?>"<?c= (plen == 9 && strncmp(p, "/database", 9) == 0) ? " aria-current=\"page\"" : "" ?>>Database</a>
+
+<h2>Transport</h2>
+<a href="/http2" class="<?c= (plen == 6 && strncmp(p, "/http2", 6) == 0) ? cls : "" ?>"<?c= (plen == 6 && strncmp(p, "/http2", 6) == 0) ? " aria-current=\"page\"" : "" ?>>HTTP/2</a>
+<a href="/tls" class="<?c= (plen == 4 && strncmp(p, "/tls", 4) == 0) ? cls : "" ?>"<?c= (plen == 4 && strncmp(p, "/tls", 4) == 0) ? " aria-current=\"page\"" : "" ?>>HTTPS / TLS</a>
+
+<h2>Reference</h2>
+<a href="/api" class="<?c= (plen == 4 && strncmp(p, "/api", 4) == 0) ? cls : "" ?>"<?c= (plen == 4 && strncmp(p, "/api", 4) == 0) ? " aria-current=\"page\"" : "" ?>>API reference</a>

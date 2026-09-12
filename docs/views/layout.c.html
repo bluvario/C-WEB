@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C-WEB documentation</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="doc">
+    <aside class="doc-side">
+      <a class="brand" href="/">C-WEB<span class="accent">.docs</span>
+        <small>a web framework in C</small>
+      </a>
+      <nav class="nav">
+        <?c page_nav(req, res, params, user_data); ?>
+      </nav>
+    </aside>
+    <main class="doc-main">
+      <article>
+        <?c cweb_tpl_layout_emit(res); ?>
+      </article>
+      <footer class="doc-foot">
+        C-WEB — served by C-WEB. The docs live in <code>docs/</code> and are
+        themselves a normal cweb app.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
