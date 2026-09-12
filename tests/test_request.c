@@ -97,6 +97,7 @@ int main(void)
     fails += check("chunked with extension parses", rc == REQ_OK);
     dr = http_request_decode_chunked(&req, chunkb, strlen(chunkb), &consumed);
     fails += check("chunked with extension decodes", dr == 0 && sv_equal(req.body, sv_from_cstr("test")));
+    http_request_free(&req);
     // trailers after the zero chunk are dropped with the framing
     char chunkc[] = "POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
                     "1\r\na\r\n0\r\nX-Trail: y\r\n\r\n";

@@ -361,6 +361,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"ip.h\"\n"
         "#include \"client_ip.h\"\n"
         "#include \"log.h\"\n"
+        "#include \"tls.h\"\n"
         "\n"
         "// one server-side session store for the whole process, handed to every\n"
         "// page as user_data; sessions live for an hour of inactivity\n"
@@ -393,6 +394,14 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// --tls-key; either NULL leaves the server plaintext\n"
         "static const char *cweb_tls_cert = NULL;\n"
         "static const char *cweb_tls_key = NULL;\n"
+        "\n"
+        "// --tls alone (with no cert/key pair) still serves HTTPS: the first\n"
+        "// run mints a self-signed pair under ~/.cweb and reuses it after,\n"
+        "// so the thumbprint stays stable across restarts. these buffers hold\n"
+        "// the resolved paths while the process lives.\n"
+        "static int cweb_tls = 0;\n"
+        "static char cweb_tls_autocert[4096];\n"
+        "static char cweb_tls_autokey[4096];\n"
         "\n"
         "// shared secret for HMAC-signed requests, from --signature-secret;\n"
         "// NULL keeps request signing off entirely\n"
@@ -681,6 +690,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
             "            cweb_tls_cert = argv[++i];\n"
             "        } else if (strcmp(argv[i], \"--tls-key\") == 0 && i + 1 < argc) {\n"
             "            cweb_tls_key = argv[++i];\n"
+            "        } else if (strcmp(argv[i], \"--tls\") == 0) {\n"
+            "            cweb_tls = 1;\n"
             "        } else if (strcmp(argv[i], \"--io-timeout\") == 0 && i + 1 < argc) {\n"
         "            cweb_io_timeout_ms = strtoul(argv[++i], NULL, 10);\n"
 "        } else if (strcmp(argv[i], \"--workers\") == 0 && i + 1 < argc) {\n"
@@ -888,6 +899,45 @@ fputs(
         "    cfg.max_body = cweb_max_body;\n"
         "    cfg.max_inflated = cweb_max_inflated;\n"
         "    cfg.body_dir = cweb_body_dir;\n"
+        "    if (cweb_tls && cweb_tls_cert == NULL && cweb_tls_key == NULL) {\n"
+        "        // --tls with no explicit pair: trust-on-first-use. mint a\n"
+        "        // self-signed pair under ~/.cweb once and reuse it, so the\n"
+        "        // certificate (and its warning-page exception) survives\n"
+        "        // restarts. print the fingerprint so it can be pinned.\n"
+        "        const char *home = getenv(\"HOME\");\n"
+        "        char tlsdir[4096];\n"
+        "        snprintf(tlsdir, sizeof tlsdir, \"%s/.cweb\",\n"
+        "                 home != NULL ? home : \".\");\n"
+        "        int created = 0;\n"
+        "        char terr[256];\n"
+        "        if (tls_self_signed_paths(tlsdir, \"server\",\n"
+        "                                  cweb_tls_autocert,\n"
+        "                                  sizeof cweb_tls_autocert,\n"
+        "                                  cweb_tls_autokey,\n"
+        "                                  sizeof cweb_tls_autokey,\n"
+        "                                  &created,\n"
+        "                                  terr, sizeof terr) != 0) {\n"
+        "            fprintf(stderr,\n"
+        "                    \"cweb: cannot provide a self-signed certificate: \"\n"
+        "                    \"%s\\n\",\n"
+        "                    tls_available() ? \"write under \" : \"\");\n"
+        "            fprintf(stderr, \"cweb: %s\\n\", tls_available()\n"
+        "                    ? tlsdir : terr);\n"
+        "            return 1;\n"
+        "        }\n"
+        "        cweb_tls_cert = cweb_tls_autocert;\n"
+        "        cweb_tls_key = cweb_tls_autokey;\n"
+        "        char fp[128];\n"
+        "        printf(\"TLS: %s self-signed certificate %s\\n\",\n"
+        "               created ? \"generated\" : \"reusing\", cweb_tls_autocert);\n"
+        "        if (tls_cert_file_sha256(cweb_tls_autocert, fp, sizeof fp) == 0) {\n"
+        "            printf(\"TLS: sha256 fingerprint %s\\n\", fp);\n"
+        "        }\n"
+        "    } else if (cweb_tls && (cweb_tls_cert == NULL || cweb_tls_key == NULL)) {\n"
+        "        fprintf(stderr, \"cweb: --tls needs both --tls-cert and \"\n"
+        "                        \"--tls-key, or neither for a self-signed pair\\n\");\n"
+        "        return 2;\n"
+        "    }\n"
         "    cfg.tls_cert = cweb_tls_cert;\n"
         "    cfg.tls_key = cweb_tls_key;\n"
         "    cfg.io_timeout_ms = cweb_io_timeout_ms;\n"
@@ -1138,6 +1188,9 @@ static int cmd_build(int argc, char **argv)
                 if (strcmp(routes[i], routes[j]) == 0) {
                     fprintf(stderr, "cweb: %s and %s map to the same route %s\n",
                             views.items[i], views.items[j], routes[i]);
+                    sl_free(&views);
+                    xfree(names);
+                    xfree(routes);
                     return 1;
                 }
             }
@@ -1146,6 +1199,9 @@ static int cmd_build(int argc, char **argv)
             if (strcmp(names[i], names[j]) == 0) {
                 fprintf(stderr, "cweb: %s and %s collide on handler %s\n",
                         views.items[i], views.items[j], names[i]);
+                sl_free(&views);
+                xfree(names);
+                xfree(routes);
                 return 1;
             }
         }
