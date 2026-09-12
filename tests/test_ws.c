@@ -168,6 +168,7 @@ int main(void)
         check("no default Connection: close on a 101",
               strstr(wire.items, "Connection: close") == NULL);
         http_request_free(&req);
+        free(res.upgrade_user); // the server frees it via ws_trampoline; not run here
         http_response_free(&res);
         strbuf_free(&wire);
     }

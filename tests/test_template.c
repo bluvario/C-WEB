@@ -289,11 +289,19 @@ int main(void)
 
     char cmd[4096];
     char warn_path[512];
+    const char *tcc = getenv("CWEB_TEST_CC");
+    if (tcc == NULL || *tcc == '\0') {
+        tcc = "cc";
+    }
+    const char *tcflags = getenv("CWEB_TEST_CFLAGS");
+    if (tcflags == NULL) {
+        tcflags = "";
+    }
     snprintf(warn_path, sizeof warn_path, "%s/template_warnings.txt", tpl_dir);
     snprintf(cmd, sizeof cmd,
-             "cc -std=c11 -Wall -Wextra -Iinclude %s %s build/libcweb.a "
-             "-o %s 2>%s",
-             gen_path, main_path, bin_path, warn_path);
+             "%s %s -std=c11 -Wall -Wextra -Iinclude %s %s "
+             "build/libcweb.a -o %s 2>%s",
+             tcc, tcflags, gen_path, main_path, bin_path, warn_path);
     check("generated code compiles clean", system(cmd) == 0);
 
     // a warning in the generated output is a framework bug, not a page bug

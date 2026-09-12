@@ -74,7 +74,9 @@ static size_t sse_pump(void *buf, size_t cap, void *user_data)
     if (n > cap) {
         n = cap;
     }
-    memcpy(buf, frame.items, n);
+    if (n > 0) {
+        memcpy(buf, frame.items, n);
+    }
     strbuf_free(&frame);
     return n;
 }

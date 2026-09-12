@@ -266,6 +266,8 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
+    router_free(&router);
+
     // --- static mount ----------------------------------------------------
     // a real file tree on disk, served from "/assets" by a prefix mount
     (void)mkdir("build/mnt", 0755);
@@ -352,6 +354,10 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
+    if (http_static_unmount(&site, "/assets") != 0) {
+        fprintf(stderr, "static unmount failed\n");
+        return 1;
+    }
     router_free(&site);
     unlink("build/mnt/css/app.css");
     unlink("build/mnt/index.html");

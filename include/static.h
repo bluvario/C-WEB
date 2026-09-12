@@ -25,4 +25,9 @@ void http_static_set_cache(unsigned long max_age);
 // mount lives as long as the router does.
 int http_static_mount(Http_Router *r, const char *url_prefix, const char *fs_root);
 
+// removes a static mount previously registered with http_static_mount under
+// url_prefix and frees the closure the library allocated for it. returns 0 on
+// success, -1 if no matching mount exists.
+int http_static_unmount(Http_Router *r, const char *url_prefix);
+
 #endif

@@ -326,3 +326,23 @@ int http_static_mount(Http_Router *r, const char *url_prefix, const char *fs_roo
     }
     return router_add(r, HTTP_GET, pattern, http_static_mount_handler, mount);
 }
+
+int http_static_unmount(Http_Router *r, const char *url_prefix)
+{
+    char pattern[1024];
+    int n = snprintf(pattern, sizeof(pattern), "%s/*", url_prefix);
+    if (n <= 0 || (size_t)n >= sizeof(pattern)) {
+        return -1;
+    }
+    void *ud = NULL;
+    if (router_remove(r, HTTP_GET, pattern, &ud) != 0) {
+        return -1;
+    }
+    Static_Mount *mount = ud;
+    if (mount != NULL) {
+        xfree(mount->url_prefix);
+        xfree(mount->fs_root);
+        xfree(mount);
+    }
+    return 0;
+}

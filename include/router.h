@@ -45,6 +45,13 @@ int router_add_timeout(Http_Router *r, Http_Method method, const char *pattern,
 int router_set_timeout(Http_Router *r, Http_Method method, const char *pattern,
                        unsigned long timeout_ms);
 
+// removes the first route matching method+pattern. the route's owned pattern is
+// freed; its user_data is returned through *user_data_out (which may be NULL)
+// so the caller can release anything it owns. returns 0 on success, -1 if no
+// match.
+int router_remove(Http_Router *r, Http_Method method, const char *pattern,
+                  void **user_data_out);
+
 // dispatches a parsed request: first matching route wins and its handler runs
 // with the captured params. no match produces a 404 response. designed to be
 // passed straight to http_serve as the top-level handler with the router as

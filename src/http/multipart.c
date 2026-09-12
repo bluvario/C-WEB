@@ -188,6 +188,8 @@ int multipart_parse(Multipart *m, String_View body, const char *boundary)
         size_t delim_pos = find_delimiter(body, content_start, boundary, blen);
         if (delim_pos == (size_t)-1) {
             // a part always ends at a real delimiter or the closing one
+            strmap_free(&part.headers);
+            multipart_free(m);
             return -1;
         }
         // content ends where the delimiter's leading CRLF begins; that CRLF is

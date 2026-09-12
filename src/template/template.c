@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #include "date.h"
 #include "file.h"
@@ -23,6 +26,48 @@
 static _Thread_local Strbuf cap_buf;
 static _Thread_local Strbuf page_buf; // the response's real body, parked here while capturing
 
+#ifndef _WIN32
+// a worker thread's capture buffers leak if they are only cleaned when the
+// thread that owns them exits. pthread keys run a destructor on thread exit,
+// so each worker releases its buffers instead of pinning a few hundred
+// bytes per thread until process teardown.
+typedef struct {
+    Strbuf *cap;
+    Strbuf *page;
+} Tpl_Tls_Ctl;
+
+static pthread_once_t tpl_tls_once = PTHREAD_ONCE_INIT;
+static pthread_key_t tpl_tls_key;
+
+static void tpl_tls_dtor(void *p)
+{
+    Tpl_Tls_Ctl *ctl = p;
+    pthread_setspecific(tpl_tls_key, NULL); // avoid repeat dtor calls
+    strbuf_free(ctl->cap);
+    strbuf_free(ctl->page);
+    xfree(ctl);
+}
+
+static void tpl_tls_key_init(void)
+{
+    pthread_key_create(&tpl_tls_key, tpl_tls_dtor);
+}
+
+static void tpl_tls_register(void)
+{
+    if (pthread_once(&tpl_tls_once, tpl_tls_key_init) != 0) {
+        return;
+    }
+    if (pthread_getspecific(tpl_tls_key) != NULL) {
+        return; // already registered for this thread
+    }
+    Tpl_Tls_Ctl *ctl = xmalloc(sizeof *ctl);
+    ctl->cap = &cap_buf;
+    ctl->page = &page_buf;
+    pthread_setspecific(tpl_tls_key, ctl);
+}
+#endif
+
 void cweb_tpl_add(Http_Response *res, const void *data, size_t len)
 {
     http_response_add_body(res, (String_View){(const char *)data, len});
@@ -30,6 +75,9 @@ void cweb_tpl_add(Http_Response *res, const void *data, size_t len)
 
 void cweb_tpl_capture_begin(Http_Response *res)
 {
+#ifndef _WIN32
+    tpl_tls_register(); // arm the pthread-key destructor that frees these buffers
+#endif
     if (cap_buf.items == NULL) {
         strbuf_init(&cap_buf);
     }

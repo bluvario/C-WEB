@@ -946,7 +946,7 @@ fputs(
         "    // the dispatch and its state are shared by every listener\n"
         "    Http_Handler_Fn cweb_dispatch;\n"
         "    void *cweb_user;\n"
-        "    Http_RateLimiter limiter;\n"
+        "    static Http_RateLimiter limiter;\n"
         "    int cweb_middleware = secure || gzip || rate_per_min > 0 ||\n"
         "                         cweb_signature_secret != NULL ||\n"
         "                         cweb_basic_auth != NULL ||\n"
@@ -968,7 +968,7 @@ fputs(
         "                                   (double)rate_per_min);\n"
         "            limiter.key_fn = cweb_rate_key;\n"
         "        }\n"
-        "        Http_Signature_Options sig_opts = {0};\n"
+        "        static Http_Signature_Options sig_opts = {0};\n"
         "        if (cweb_signature_secret != NULL) {\n"
         "            // --signature-secret makes every request prove it came\n"
         "            // from a proxy holding the same secret, 403 otherwise\n"
@@ -976,19 +976,21 @@ fputs(
         "        }\n"
         "        // --csp overrides the middleware's default directive;\n"
         "        // --csp-report-only adds a monitoring-only policy on top\n"
-        "        Http_Security_Options sec_opts = {0};\n"
+        "        static Http_Security_Options sec_opts = {0};\n"
         "        if (cweb_csp != NULL || cweb_csp_report_only != NULL) {\n"
         "            sec_opts.csp = cweb_csp;\n"
         "            sec_opts.csp_report_only = cweb_csp_report_only;\n"
         "        }\n"
-        "        Http_Cors_Options cors_opts = {0};\n"
+        "        static Http_Cors_Options cors_opts = {0};\n"
         "        if (cweb_cors_origin != NULL) {\n"
         "            cors_opts.origin = cweb_cors_origin;\n"
         "        }\n"
         "        Http_Middleware_Chain chain;\n"
         "        http_middleware_init(&chain);\n"
-        "        Http_ClientIp_Options ip_opts = {cweb_trusted, cweb_trusted_count};\n"
+        "        static Http_ClientIp_Options ip_opts = {0};\n"
         "        if (cweb_trusted_count > 0) {\n"
+        "            ip_opts.trusted = cweb_trusted;\n"
+        "            ip_opts.trusted_count = cweb_trusted_count;\n"
         "            // resolves req->client_ip from X-Forwarded-For for requests\n"
         "            // that arrived straight from a trusted proxy. outermost, so\n"
         "            // access logs and the per-address rate buckets below name\n"
@@ -1000,7 +1002,7 @@ fputs(
         "            // --request-id stamps every response (and every\n"
         "            // req->request_id) with a unique trace id; outermost,\n"
         "            // so even a short-circuited chain still carries it on\n"
-        "            Http_RequestId_Opts rid_opts = {0};\n"
+        "            static Http_RequestId_Opts rid_opts = {0};\n"
         "            rid_opts.honor_incoming = cweb_request_id_inherit;\n"
         "            http_middleware_add(&chain, http_request_id_middleware,\n"
         "                                &rid_opts);\n"
@@ -1023,7 +1025,7 @@ fputs(
         "            http_middleware_add(&chain, http_rate_limit_middleware,\n"
         "                                &limiter);\n"
         "        }\n"
-        "        Http_BasicAuth_Options basic_opts = {0};\n"
+        "        static Http_BasicAuth_Options basic_opts = {0};\n"
         "        if (cweb_basic_auth != NULL) {\n"
         "            // --basic-auth USER:PASS locks the whole app behind HTTP\n"
         "            // Basic auth; the pair was split into these buffers while\n"
@@ -1094,6 +1096,9 @@ fputs(
         "    if (clf_file != NULL) {\n"
         "        log_set_clf(NULL);\n"
         "        fclose(clf_file);\n"
+        "    }\n"
+        "    if (cweb_static_root[0] != '\\0') {\n"
+        "        http_static_unmount(&r, \"\");\n"
         "    }\n"
         "    router_free(&r);\n"
         "    net_cleanup();\n"
@@ -1220,11 +1225,17 @@ static int cmd_build(int argc, char **argv)
         if (cweb_template_compile(full, &src, &err) != 0) {
             fprintf(stderr, "cweb: %s: %.*s\n", views.items[i],
                     (int)err.count, err.items);
+            sl_free(&views);
+            xfree(names);
+            xfree(routes);
             return 1;
         }
         snprintf(gen, sizeof gen, "%s/%s.c", out_arg, names[i]);
         FILE *f = fopen(gen, "w");
         if (f == NULL) {
+            sl_free(&views);
+            xfree(names);
+            xfree(routes);
             return die("cannot write generated C");
         }
         fwrite(src.items, 1, src.count, f);
@@ -1238,6 +1249,9 @@ static int cmd_build(int argc, char **argv)
     snprintf(main_path, sizeof main_path, "%s/main.c", out_arg);
     FILE *f = fopen(main_path, "w");
     if (f == NULL) {
+        sl_free(&views);
+        xfree(names);
+        xfree(routes);
         return die("cannot write generated main");
     }
     emit_main(f, &views, static_arg, has_404, has_layout);
@@ -1249,6 +1263,9 @@ static int cmd_build(int argc, char **argv)
     snprintf(vh_path, sizeof vh_path, "%s/pages.h", out_arg);
     f = fopen(vh_path, "w");
     if (f == NULL) {
+        sl_free(&views);
+        xfree(names);
+        xfree(routes);
         return die("cannot write generated pages.h");
     }
     fputs(
@@ -1282,7 +1299,18 @@ static int cmd_build(int argc, char **argv)
     snprintf(bin_path, sizeof bin_path, "%s/server", out_arg);
     Strbuf cc;
     strbuf_init(&cc);
-    strbuf_append_cstr(&cc, "cc -std=c11 -Wall -Wextra -Werror -I");
+    const char *cwc = getenv("CWEB_TEST_CC");
+    if (cwc != NULL && *cwc != '\0') {
+        strbuf_append_cstr(&cc, cwc);
+    } else {
+        strbuf_append_cstr(&cc, "cc");
+    }
+    const char *cwflags = getenv("CWEB_TEST_CFLAGS");
+    if (cwflags != NULL && *cwflags != '\0') {
+        strbuf_append_char(&cc, ' ');
+        strbuf_append_cstr(&cc, cwflags);
+    }
+    strbuf_append_cstr(&cc, " -std=c11 -Wall -Wextra -Werror -I");
     strbuf_append_shell_quoted(&cc, root);
     strbuf_append_cstr(&cc, "/include -I");
     strbuf_append_shell_quoted(&cc, out_arg);
@@ -1302,6 +1330,9 @@ static int cmd_build(int argc, char **argv)
     int rc = system(cc.items);
     strbuf_free(&cc);
     if (rc != 0) {
+        sl_free(&views);
+        xfree(names);
+        xfree(routes);
         return die("cc could not link the server (build tree up to date? run make)");
     }
 

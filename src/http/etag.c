@@ -82,6 +82,7 @@ void http_etag_middleware(Http_Request *req, Http_Response *res,
 
     char *owned = http_response_get_header(res, "ETag");
     String_View tag;
+    char tag_buf[96];
     if (owned == NULL) {
         // the handler did not stamp a validator: synthesize a strong etag
         // from the body bytes unless the options ask for a weak one
@@ -89,7 +90,6 @@ void http_etag_middleware(Http_Request *req, Http_Response *res,
         sha256((const unsigned char *)res->body.items, res->body.count, digest);
         char hex[65];
         hex64(digest, hex);
-        char tag_buf[96];
         const Http_Etag_Options *opts = user_data;
         snprintf(tag_buf, sizeof tag_buf, opts != NULL && opts->weak
                                             ? "W/\"%s\"" : "\"%s\"", hex);

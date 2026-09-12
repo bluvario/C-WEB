@@ -54,7 +54,7 @@ examples: build/examples/login/server build/examples/notes/server
 	@echo "run it with:       ./build/examples/notes/server --port 8080 --db notes.db --secure"
 
 test: build/cweb $(TESTS:%=build/tests/%)
-	@for t in $(TESTS); do ./build/tests/$$t || exit 1; done
+	@for t in $(TESTS); do CWEB_TEST_CC="$(CC)" CWEB_TEST_CFLAGS="$(CFLAGS)" ./build/tests/$$t || exit 1; done
 
 clean:
 	rm -rf build

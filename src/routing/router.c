@@ -66,6 +66,25 @@ int router_set_timeout(Http_Router *r, Http_Method method, const char *pattern,
     return -1;
 }
 
+int router_remove(Http_Router *r, Http_Method method, const char *pattern,
+                  void **user_data_out)
+{
+    for (size_t i = 0; i < r->count; i++) {
+        if (r->items[i].method == method &&
+            strcmp(r->items[i].pattern, pattern) == 0) {
+            if (user_data_out != NULL) {
+                *user_data_out = r->items[i].user_data;
+            }
+            xfree(r->items[i].pattern);
+            memmove(&r->items[i], &r->items[i + 1],
+                    (r->count - 1 - i) * sizeof *r->items);
+            r->count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 // is name already one of the comma-separated tokens in allow[0..len-1]?
 static bool allow_has(const char *allow, size_t len, const char *name)
 {

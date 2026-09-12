@@ -36,6 +36,9 @@ bool sv_equal(String_View a, String_View b)
     if (a.count != b.count) {
         return false;
     }
+    if (a.count == 0) {
+        return true;
+    }
     return memcmp(a.data, b.data, a.count) == 0;
 }
 
