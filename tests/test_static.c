@@ -286,13 +286,139 @@ int main(void)
     http_response_free(&res);
     http_request_free(&req);
 
-    // a multi-range list is answered in full because one 200 covers them all
+    // a multi-range list is answered 206 with a multipart/byteranges body:
+    // one part per coalesced window, each carrying its own Content-Range
     http_request_parse(&req, sv_from_cstr(
-        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-2,4-5\r\n\r\n"));
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-2,6-11\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT) {
+        fprintf(stderr, "multi-range should be 206, got %d\n", (int)res.status);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "Content-Type: multipart/byteranges; boundary=") == NULL) {
+        fprintf(stderr, "multi-range must be multipart/byteranges:\n%s\n", wire.items);
+        return 1;
+    }
+    if (strstr(wire.items, "Content-Range: bytes 0-2/12\r\n") == NULL ||
+        strstr(wire.items, "Content-Range: bytes 6-11/12\r\n") == NULL) {
+        fprintf(stderr, "multi-range parts carry the wrong Content-Range:\n%s\n", wire.items);
+        return 1;
+    }
+    const char *b0 = strstr(wire.items, "boundary=");
+    const char *bstart = b0 ? b0 + strlen("boundary=") : NULL;
+    const char *bend = bstart ? strchr(bstart, '\r') : NULL;
+    size_t blen = (bstart && bend) ? (size_t)(bend - bstart) : 0;
+    char btok[64];
+    if (blen == 0 || blen >= sizeof btok) {
+        fprintf(stderr, "could not find multipart boundary:\n%s\n", wire.items);
+        return 1;
+    }
+    memcpy(btok, bstart, blen);
+    btok[blen] = '\0';
+    char part1[256];
+    snprintf(part1, sizeof part1,
+             "--%s\r\nContent-Type: text/plain\r\n"
+             "Content-Range: bytes 0-2/12\r\n\r\nhel", btok);
+    char part2[256];
+    snprintf(part2, sizeof part2,
+             "\r\n--%s\r\nContent-Type: text/plain\r\n"
+             "Content-Range: bytes 6-11/12\r\n\r\nstatic", btok);
+    char endtok[96];
+    snprintf(endtok, sizeof endtok, "\r\n--%s--\r\n", btok);
+    if (strstr(wire.items, part1) == NULL ||
+        strstr(wire.items, part2) == NULL ||
+        strstr(wire.items, endtok) == NULL) {
+        fprintf(stderr, "multipart body payloads are misplaced:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // overlapping windows coalesce so no byte is served twice (RFC 9110 14.2)
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=0-5,3-7\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT || res.body.count != 8) {
+        fprintf(stderr, "overlapping ranges must coalesce into one window, got %d(%zu)\n",
+                (int)res.status, res.body.count);
+        return 1;
+    }
+    strbuf_init(&wire);
+    http_response_serialize(&res, &wire);
+    strbuf_null_terminate(&wire);
+    if (strstr(wire.items, "bytes 0-7/12\r\n") == NULL) {
+        fprintf(stderr, "coalesced window must claim bytes 0-7:\n%s\n", wire.items);
+        return 1;
+    }
+    strbuf_free(&wire);
+    http_response_free(&res);
+    http_request_free(&req);
+
+    // If-Range: the exact ETag keeps the window; a stale one falls back to a
+    // full 200 that carries the entire body
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\n"
+        "Range: bytes=0-4\r\nIf-Range: \"different\"\r\n\r\n"));
     http_response_init(&res);
     http_serve_static(&req, &res, rootbuf);
     if (res.status != HTTP_200_OK || res.body.count != 12) {
-        fprintf(stderr, "multi-range should fall back to full 200, got %d\n", (int)res.status);
+        fprintf(stderr, "stale If-Range must ignore Range and send 200, got %d\n",
+                (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    strbuf_init(&probe);
+    strbuf_append_cstr(&probe, "GET /hello.txt HTTP/1.1\r\nHost: x\r\n"
+                               "Range: bytes=0-4\r\nIf-Range: ");
+    strbuf_append_cstr(&probe, etag);
+    strbuf_append_cstr(&probe, "\r\n\r\n");
+    strbuf_null_terminate(&probe);
+    http_request_parse(&req, (String_View){probe.items, probe.count});
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT || res.body.count != 5 ||
+        memcmp(res.body.items, "hello", 5) != 0) {
+        fprintf(stderr, "matching If-Range ETag must keep the 206, got %d\n",
+                (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+    strbuf_free(&probe);
+
+    // If-Range with a future date keeps the window; with a past one it is
+    // ignored and the whole file comes back
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\n"
+        "Range: bytes=6-\r\n"
+        "If-Range: Sat, 01 Jan 2100 00:00:00 GMT\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_206_PARTIAL_CONTENT || res.body.count != 6) {
+        fprintf(stderr, "future If-Range date must keep the 206, got %d\n",
+                (int)res.status);
+        return 1;
+    }
+    http_response_free(&res);
+    http_request_free(&req);
+
+    http_request_parse(&req, sv_from_cstr(
+        "GET /hello.txt HTTP/1.1\r\nHost: x\r\n"
+        "Range: bytes=6-\r\n"
+        "If-Range: Sat, 01 Jan 1970 00:00:00 GMT\r\n\r\n"));
+    http_response_init(&res);
+    http_serve_static(&req, &res, rootbuf);
+    if (res.status != HTTP_200_OK || res.body.count != 12) {
+        fprintf(stderr, "past If-Range date must fall back to 200, got %d\n",
+                (int)res.status);
         return 1;
     }
     http_response_free(&res);

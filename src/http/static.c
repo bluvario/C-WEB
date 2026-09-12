@@ -1,6 +1,7 @@
 #include "static.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "date.h"
@@ -67,63 +68,128 @@ static bool etag_list_matches(String_View header, const char *ours)
     return false;
 }
 
-// single-range bytes=<start>-<end> only. returns 0 when no range applies (the
-// whole file is served), 1 when only [*base, *base+*n) should be served, and
-// -1 when the header asks for bytes the file cannot cover (caller answers
-// 416). multi-range lists get a plain 200, which is always legal.
-static int parse_range(String_View header, size_t fsize, size_t *base, size_t *n)
+// a coalesced byte range: [base, base+n)
+typedef struct {
+    size_t base;
+    size_t n;
+} Byte_Range;
+
+#define MAX_RANGES 64
+
+// parses one "N-M", "N-", or "-N" byte-range-spec, clamping the window to the
+// file end. returns 0 with *out filled when the spec asks for bytes the file
+// has, -1 when it is unsatisfiable.
+static int range_spec(String_View spec, size_t fsize, Byte_Range *out)
 {
-    header = sv_trim(header);
-    if (!sv_consume_prefix(&header, "bytes=")) {
-        return 0;
-    }
-    // any comma means a list; one 200 with the full body covers them all
-    if (sv_count_char(header, ',') > 0) {
-        return 0;
-    }
-    String_View start = sv_chop_by_delim(&header, '-');
+    spec = sv_trim(spec);
+    String_View start = sv_chop_by_delim(&spec, '-');
     start = sv_trim(start);
-    header = sv_trim(header);
+    spec = sv_trim(spec);
 
-    if (start.count == 0 && header.count == 0) {
-        return -1; // "bytes=" with nothing at all
+    if (start.count == 0 && spec.count == 0) {
+        return -1; // "bytes=-" with nothing at all
     }
 
-    if (start.count > 0 && header.count == 0) {
+    if (start.count > 0 && spec.count == 0) {
         // "N-": from N to the end
         long long from;
         if (!sv_to_i64(start, &from) || from < 0 || (size_t)from >= fsize) {
             return -1;
         }
-        *base = (size_t)from;
-        *n = fsize - *base;
-        return 1;
+        out->base = (size_t)from;
+        out->n = fsize - out->base;
+        return 0;
     }
 
-    if (start.count == 0 && header.count > 0) {
+    if (start.count == 0 && spec.count > 0) {
         // "-N": the final N bytes
         long long last;
-        if (!sv_to_i64(header, &last) || last <= 0) {
+        if (!sv_to_i64(spec, &last) || last <= 0 || fsize == 0) {
             return -1;
         }
-        if (fsize == 0) {
-            return -1;
-        }
-        *n = (size_t)last < fsize ? (size_t)last : fsize;
-        *base = fsize - *n;
-        return 1;
+        out->n = (size_t)last < fsize ? (size_t)last : fsize;
+        out->base = fsize - out->n;
+        return 0;
     }
 
     // "N-M": a closed window, clamped to the file end
     long long from, to;
-    if (!sv_to_i64(start, &from) || !sv_to_i64(header, &to) ||
+    if (!sv_to_i64(start, &from) || !sv_to_i64(spec, &to) ||
         from < 0 || to < from || (size_t)from >= fsize) {
         return -1;
     }
-    *base = (size_t)from;
+    out->base = (size_t)from;
     size_t want = (size_t)(to - from) + 1;
-    *n = want < fsize - *base ? want : fsize - *base;
-    return 1;
+    out->n = want < fsize - out->base ? want : fsize - out->base;
+    return 0;
+}
+
+static int range_cmp(const void *a, const void *b)
+{
+    const Byte_Range *x = a;
+    const Byte_Range *y = b;
+    return (int)(x->base > y->base) - (int)(x->base < y->base);
+}
+
+// parses a "bytes=" range list (RFC 7233), coalescing overlapping and
+// adjacent windows so no byte is served twice (RFC 9110 14.2). fills out up
+// to cap entries and returns how many, 0 when no range applies (the whole
+// file is served), and -1 when every spec is unsatisfiable (caller answers
+// 416). a mix of satisfiable and not only keeps the satisfiable ones.
+static int parse_ranges(String_View header, size_t fsize,
+                        Byte_Range *out, size_t cap)
+{
+    header = sv_trim(header);
+    if (!sv_consume_prefix(&header, "bytes=")) {
+        return 0;
+    }
+    if (sv_count_char(header, ',') == 0) {
+        int rr = range_spec(header, fsize, out);
+        return rr < 0 ? -1 : 1;
+    }
+
+    Byte_Range raw[MAX_RANGES];
+    size_t nraw = 0;
+    String_View rest = header;
+    while (rest.count > 0) {
+        String_View spec = sv_chop_by_delim(&rest, ',');
+        Byte_Range r;
+        if (nraw < MAX_RANGES && range_spec(spec, fsize, &r) == 0) {
+            raw[nraw++] = r;
+        }
+    }
+    if (nraw == 0) {
+        return -1;
+    }
+    qsort(raw, nraw, sizeof raw[0], range_cmp);
+    size_t nout = 0;
+    for (size_t i = 0; i < nraw && nout < cap; i++) {
+        if (nout > 0 && raw[i].base <= out[nout - 1].base + out[nout - 1].n) {
+            // overlaps or is adjacent to the coalesced window: extend it
+            size_t end = raw[i].base + raw[i].n;
+            size_t prev_end = out[nout - 1].base + out[nout - 1].n;
+            if (end > prev_end) {
+                out[nout - 1].n += end - prev_end;
+            }
+        } else {
+            out[nout++] = raw[i];
+        }
+    }
+    return (int)nout;
+}
+
+// does the If-Range validator (RFC 7233 3.2) still match the current copy?
+// strong entity-tag comparison only -- a weak W/ tag never matches -- or else
+// an HTTP-date that is not earlier than Last-Modified.
+static bool if_range_matches(String_View v, const char *etag, time_t mtime)
+{
+    v = sv_trim(v);
+    if (v.count >= 2 && v.data[0] == '"' && v.data[v.count - 1] == '"') {
+        size_t n = strlen(etag);
+        return n == v.count && memcmp(etag, v.data, n) == 0;
+    }
+    time_t since = http_date_parse(v);
+    return since >= 0 && mtime <= since;
 }
 
 void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
@@ -233,46 +299,109 @@ void http_serve_static(Http_Request *req, Http_Response *res, void *user_data)
         return;
     }
 
-    // ranges only make sense for fetches; other verbs get the whole entity
-    size_t base = 0;
-    size_t rlen = fsize;
-    bool partial = false;
+    // ranges only make sense for fetches; other verbs get the whole entity.
+    // If-Range gates the whole request: when the validator it names no longer
+    // matches the current copy, the Range header is ignored entirely and the
+    // full body is served instead.
+    Byte_Range ranges[MAX_RANGES];
+    int nrange = 0;
     if (req->method == HTTP_GET || req->method == HTTP_HEAD) {
         const String_View *range = http_request_get_header(req, "range");
         if (range != NULL) {
-            int rr = parse_range(*range, fsize, &base, &rlen);
-            if (rr < 0) {
-                // tell the client what the resource will actually hand out
-                char bad[64];
-                snprintf(bad, sizeof(bad), "bytes */%zu", fsize);
-                http_response_set_status(res, HTTP_416_RANGE_NOT_SATISFIABLE);
-                http_response_set_header(res, "Content-Range", bad);
-                strbuf_free(&path);
-                return;
+            const String_View *ir = http_request_get_header(req, "if-range");
+            if (ir == NULL || if_range_matches(*ir, etag, mtime)) {
+                int rr = parse_ranges(*range, fsize, ranges, MAX_RANGES);
+                if (rr < 0) {
+                    // tell the client what the resource will actually hand out
+                    char bad[64];
+                    snprintf(bad, sizeof(bad), "bytes */%zu", fsize);
+                    http_response_set_status(res, HTTP_416_RANGE_NOT_SATISFIABLE);
+                    http_response_set_header(res, "Content-Range", bad);
+                    strbuf_free(&path);
+                    return;
+                }
+                nrange = rr;
             }
-            partial = rr > 0;
         }
     }
 
-    char *data;
-    size_t len;
-    if (partial ? file_read_range(path.items, base, rlen, &data, &len) != 0
-                : file_read_all(path.items, &data, &len) != 0) {
-        reject(res, HTTP_404_NOT_FOUND);
+    if (nrange == 0) {
+        char *data;
+        size_t len;
+        if (file_read_all(path.items, &data, &len) != 0) {
+            reject(res, HTTP_404_NOT_FOUND);
+            strbuf_free(&path);
+            return;
+        }
+        http_response_add_body(res, (String_View){data, len});
+        xfree(data);
         strbuf_free(&path);
         return;
     }
+
+    // a single range is answered with one Content-Range; several coalesced
+    // ranges become a multipart/byteranges body with one part per window
+    Strbuf body;
+    strbuf_init(&body);
+    bool ok = true;
+    if (nrange == 1) {
+        char *data;
+        size_t len;
+        if (file_read_range(path.items, ranges[0].base, ranges[0].n,
+                            &data, &len) != 0) {
+            ok = false;
+        } else {
+            char cr[64];
+            snprintf(cr, sizeof(cr), "bytes %zu-%zu/%zu", ranges[0].base,
+                     ranges[0].base + len - 1, fsize);
+            http_response_set_header(res, "Content-Range", cr);
+            strbuf_append(&body, data, len);
+            xfree(data);
+        }
+    } else {
+        // a boundary unlikely to collide with the file bytes: mix the file
+        // stats into a short prefix so two mounts of the same size differ
+        char boundary[40];
+        snprintf(boundary, sizeof(boundary), "----cweb%08llx-%zu",
+                 (unsigned long long)mtime, fsize);
+        char ctype[96];
+        snprintf(ctype, sizeof(ctype), "multipart/byteranges; boundary=%s", boundary);
+        http_response_set_header(res, "Content-Type", ctype);
+        for (int i = 0; i < nrange && ok; i++) {
+            char *data;
+            size_t len;
+            if (file_read_range(path.items, ranges[i].base, ranges[i].n,
+                                &data, &len) != 0) {
+                ok = false;
+                break;
+            }
+            strbuf_append_cstr(&body, "\r\n--");
+            strbuf_append_cstr(&body, boundary);
+            strbuf_append_cstr(&body, "\r\nContent-Type: ");
+            strbuf_append(&body, mime_z, strlen(mime_z));
+            char cr[64];
+            snprintf(cr, sizeof(cr), "\r\nContent-Range: bytes %zu-%zu/%zu\r\n\r\n",
+                     ranges[i].base, ranges[i].base + len - 1, fsize);
+            strbuf_append_cstr(&body, cr);
+            strbuf_append(&body, data, len);
+            xfree(data);
+        }
+        if (ok) {
+            strbuf_append_cstr(&body, "\r\n--");
+            strbuf_append_cstr(&body, boundary);
+            strbuf_append_cstr(&body, "--\r\n");
+        }
+    }
     strbuf_free(&path);
 
-    if (partial) {
-        char cr[64];
-        snprintf(cr, sizeof(cr), "bytes %zu-%zu/%zu", base, base + len - 1, fsize);
-        http_response_set_header(res, "Content-Range", cr);
-        http_response_set_status(res, HTTP_206_PARTIAL_CONTENT);
+    if (!ok) {
+        strbuf_free(&body);
+        reject(res, HTTP_404_NOT_FOUND);
+        return;
     }
-
-    http_response_add_body(res, (String_View){data, len});
-    xfree(data);
+    http_response_set_status(res, HTTP_206_PARTIAL_CONTENT);
+    http_response_add_body(res, (String_View){body.items, body.count});
+    strbuf_free(&body);
 }
 
 // --- prefix mounts -------------------------------------------------------
