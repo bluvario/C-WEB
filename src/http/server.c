@@ -20,6 +20,7 @@
 #include "buffer.h"
 #include "date.h"
 #include "gzip.h"
+#include "h2.h"
 #include "http.h"
 #include "log.h"
 #include "net.h"
@@ -473,6 +474,35 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
     String_View remote = peer_ip(io.fd, peer_buf);
     bool route_timeout_active = false;
 
+    // h2c prior knowledge: a connection whose first bytes are the HTTP/2
+    // preface is served as cleartext HTTP/2 for its whole lifetime instead
+    // of being parsed as HTTP/1.1. anything starting with "PRI" that is not
+    // the exact 24-byte magic falls through to the HTTP/1.1 parser, which
+    // rejects it as a malformed request line. TLS sessions never negotiate
+    // h2c, so this sniff is plaintext-only.
+    if (io.ssl == NULL) {
+        while (rb.count < 3) {
+            if (fill_more(&io, &rb, false) != 0) {
+                rb_free(&rb);
+                return;
+            }
+        }
+        if (memcmp(rb.data, "PRI", 3) == 0) {
+            while (rb.count < H2_MAGIC_LEN) {
+                if (fill_more(&io, &rb, false) != 0) {
+                    rb_free(&rb);
+                    return;
+                }
+            }
+            if (memcmp(rb.data, H2_MAGIC, H2_MAGIC_LEN) == 0) {
+                h2_serve(io.fd, handler, user_data, cfg, &rb, H2_MAGIC_LEN,
+                         NULL, remote, timeout_ms);
+                rb_free(&rb);
+                return;
+            }
+        }
+    }
+
     for (;;) {
         Request_Parse_Result pr;
         size_t consumed = 0;
@@ -695,6 +725,19 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
             log_warn("malformed request from client, sending 400");
             send_error(&io, HTTP_400_BAD_REQUEST);
             break;
+        }
+
+        // an h2c upgrade request switches this connection to cleartext
+        // HTTP/2 for its lifetime: stream 1 is the request itself and every
+        // remaining byte on the socket belongs to the h2 framing layer. the
+        // 101 response and the server preface are both produced by h2_serve;
+        // nothing is sent over the HTTP/1.1 wire for this request.
+        if (io.ssl == NULL && h2_is_upgrade_request(&req)) {
+            h2_serve(io.fd, handler, user_data, cfg, &rb, consumed, &req,
+                     remote, timeout_ms);
+            http_request_free(&req);
+            rb_free(&rb);
+            return;
         }
 
         // a body that arrived Content-Encoding: gzip is inflated before the
