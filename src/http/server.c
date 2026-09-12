@@ -28,6 +28,7 @@
 #include "strbuf.h"
 #include "sv.h"
 #include "thread_pool.h"
+#include "tls.h"
 #include "xmem.h"
 
 // 64 KiB is plenty for the requests we serve; anything bigger is a 413
@@ -49,6 +50,42 @@ static void handle_signal(int sig)
 }
 
 static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
+
+// the I/O unit for one connection: a socket fd that may carry a TLS session
+// (the opaque handle from tls.h, NULL for plaintext). every byte the request
+// loop reads or writes crosses io_recv/io_send_all, so encryption is
+// transparent to dispatch: all handlers, middleware and routing work over
+// HTTPS exactly as they do over plaintext.
+typedef struct {
+    Socket_Handle fd;
+    void *ssl;
+} Http_Io;
+
+static long io_recv(Http_Io *io, void *buf, size_t len)
+{
+    if (io->ssl != NULL) {
+        return tls_recv(io->ssl, buf, len);
+    }
+    return net_recv(io->fd, buf, len);
+}
+
+static long io_send_all(Http_Io *io, const void *buf, size_t len)
+{
+    if (io->ssl != NULL) {
+        return tls_send_all(io->ssl, buf, len);
+    }
+    return net_send_all(io->fd, buf, len);
+}
+
+static void io_close(Http_Io *io)
+{
+    if (io->ssl != NULL) {
+        tls_close(io->ssl, io->fd);
+        io->ssl = NULL;
+    } else {
+        net_close(io->fd);
+    }
+}
 
 static void log_request(Http_Request *req, Http_Response *res, unsigned long long elapsed_ms)
 {
@@ -118,13 +155,13 @@ static void log_access(Http_Request *req, Http_Response *res, long long bytes)
     strbuf_free(&line);
 }
 
-static void send_wire(Socket_Handle client, Http_Response *res)
+static void send_wire(Http_Io *io, Http_Response *res)
 {
     Strbuf wire;
     strbuf_init(&wire);
     http_response_serialize(res, &wire);
     if (wire.count > 0) {
-        net_send_all(client, wire.items, wire.count);
+        io_send_all(io, wire.items, wire.count);
     }
     strbuf_free(&wire);
 }
@@ -136,9 +173,9 @@ static void send_wire(Socket_Handle client, Http_Response *res)
 // metadata is delivered but the chunked body is not, mirroring what a GET
 // with a body would send. returns the number of streamed entity bytes (0 for
 // HEAD).
-static long long send_stream(Socket_Handle client, Http_Response *res, bool send_body)
+static long long send_stream(Http_Io *io, Http_Response *res, bool send_body)
 {
-    send_wire(client, res); // head only: serialize skips the stream body
+    send_wire(io, res); // head only: serialize skips the stream body
     if (!send_body) {
         return 0;
     }
@@ -151,9 +188,9 @@ static long long send_stream(Socket_Handle client, Http_Response *res, bool send
         sent += (long long)c->len;
         char size_line[32];
         int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", c->len);
-        net_send_all(client, size_line, (size_t)sl);
-        net_send_all(client, c->data, c->len);
-        net_send_all(client, "\r\n", 2);
+        io_send_all(io, size_line, (size_t)sl);
+        io_send_all(io, c->data, c->len);
+        io_send_all(io, "\r\n", 2);
     }
     if (res->stream_fn != NULL) {
         char chunk[8192];
@@ -168,12 +205,12 @@ static long long send_stream(Socket_Handle client, Http_Response *res, bool send
             sent += (long long)n;
             char size_line[32];
             int sl = snprintf(size_line, sizeof(size_line), "%zx\r\n", n);
-            net_send_all(client, size_line, (size_t)sl);
-            net_send_all(client, chunk, n);
-            net_send_all(client, "\r\n", 2);
+            io_send_all(io, size_line, (size_t)sl);
+            io_send_all(io, chunk, n);
+            io_send_all(io, "\r\n", 2);
         }
     }
-    net_send_all(client, "0\r\n\r\n", 5);
+    io_send_all(io, "0\r\n\r\n", 5);
     return sent;
 }
 
@@ -181,28 +218,34 @@ static long long send_stream(Socket_Handle client, Http_Response *res, bool send
 // is out: anything the client pipelined past the request (e.g. the first
 // WebSocket frame) is dangling in the read buffer, so it moves to the handoff
 // as leftover bytes the protocol layer must consume before reading fresh ones.
-// the connection carries only this one request: no keep-alive after an upgrade.
-static void handle_upgrade(Socket_Handle client, Http_Response *res,
+// the connection carries only this one request: no keep-alive after an
+// upgrade. TLS connections refuse the handoff -- the raw fd a protocol layer
+// would read/write is encrypted, so upgrades are a plaintext-only affair.
+static void handle_upgrade(Http_Io *io, Http_Response *res,
                            Read_Buffer *rb, size_t consumed)
 {
-    send_wire(client, res);
+    send_wire(io, res);
+    if (io->ssl != NULL) {
+        log_warn("protocol upgrade rejected over TLS");
+        return;
+    }
     String_View buffered = rb_view(rb);
     String_View leftover;
     leftover.data = buffered.data + consumed;
     leftover.count = buffered.count - consumed;
     if (res->upgrade_fn != NULL) {
-        res->upgrade_fn(client, leftover, res->upgrade_user);
+        res->upgrade_fn(io->fd, leftover, res->upgrade_user);
     }
 }
 
-static void send_error(Socket_Handle client, Http_Status status)
+static void send_error(Http_Io *io, Http_Status status)
 {
     Http_Response res;
     http_response_init(&res);
     http_response_set_status(&res, status);
     http_response_set_header(&res, "Content-Type", "text/plain; charset=utf-8");
     http_response_add_body_cstr(&res, ERROR_BODY);
-    send_wire(client, &res);
+    send_wire(io, &res);
     http_response_free(&res);
 }
 
@@ -210,11 +253,11 @@ static void send_error(Socket_Handle client, Http_Status status)
 // bytes arrived, -1 when the connection is past saving: clean EOF and socket
 // errors just close, but a client that stalls mid-request gets a 408 (or 504
 // when a per-route timeout is active) before the door shuts.
-static int fill_more(Socket_Handle client, Read_Buffer *rb,
+static int fill_more(Http_Io *io, Read_Buffer *rb,
                      bool route_timeout_active)
 {
     String_View head = rb_write_head(rb);
-    long n = net_recv(client, (void *)head.data, head.count);
+    long n = io_recv(io, (void *)head.data, head.count);
     if (n == NET_READ_TIMEOUT) {
         if (rb->count > 0) {
             Http_Status timeout_status = route_timeout_active
@@ -222,7 +265,7 @@ static int fill_more(Socket_Handle client, Read_Buffer *rb,
                                              : HTTP_408_REQUEST_TIMEOUT;
             log_warn("client stalled mid-request, sending %d",
                      (int)timeout_status);
-            send_error(client, timeout_status);
+            send_error(io, timeout_status);
         }
         return -1;
     }
@@ -322,10 +365,10 @@ static int expect_interest(const char *head, size_t len)
     return 0;
 }
 
-static void send_continue(Socket_Handle client)
+static void send_continue(Http_Io *io)
 {
     static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
-    net_send_all(client, interim, sizeof interim - 1);
+    io_send_all(io, interim, sizeof interim - 1);
 }
 
 #ifndef _WIN32
@@ -397,8 +440,8 @@ static String_View peer_ip(Socket_Handle client, char buf[INET6_ADDRSTRLEN])
 #endif
 }
 
-void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
-                                  void *user_data, const Http_Server_Config *cfg)
+static void serve_connection(Http_Io io, Http_Handler_Fn handler,
+                             void *user_data, const Http_Server_Config *cfg)
 {
     // hardening knobs, zero meaning "library default"
     size_t max_body = cfg != NULL && cfg->max_body > 0 ? cfg->max_body
@@ -413,7 +456,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
     rb_init(&rb, max_body);
     // a dawdling client must not pin a worker forever; this is also the
     // slowloris backstop
-    net_set_timeout(client, timeout_ms);
+    net_set_timeout(io.fd, timeout_ms);
 
     // POSIX-only: request bodies larger than the in-RAM cap spill to a temp
 // file in cfg->body_dir and are mapped back, so oversized uploads stream
@@ -427,7 +470,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
 #endif
 
     char peer_buf[INET6_ADDRSTRLEN];
-    String_View remote = peer_ip(client, peer_buf);
+    String_View remote = peer_ip(io.fd, peer_buf);
     bool route_timeout_active = false;
 
     for (;;) {
@@ -447,7 +490,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
             // then map the file back so req->body reads exactly as usual
             if (spill_fd >= 0) {
                 char stage[65536];
-                long n = net_recv(client, stage, sizeof stage);
+                long n = io_recv(&io, stage, sizeof stage);
                 if (n == NET_READ_TIMEOUT) {
                     if (rb.count > 0) {
                         Http_Status st = route_timeout_active
@@ -455,7 +498,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                                              : HTTP_408_REQUEST_TIMEOUT;
                         log_warn("client stalled mid-body, sending %d",
                                  (int)st);
-                        send_error(client, st);
+                        send_error(&io, st);
                     }
                     close(spill_fd);
                     unlink(spill_path);
@@ -484,7 +527,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                             close(spill_fd);
                             unlink(spill_path);
                             xfree(spill_path);
-                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            send_error(&io, HTTP_500_INTERNAL_SERVER_ERROR);
                             http_request_free(&req);
                             rb_free(&rb);
                             return;
@@ -511,7 +554,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                         log_warn("cannot map spilled body, 500");
                         unlink(spill_path);
                         xfree(spill_path);
-                        send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                        send_error(&io, HTTP_500_INTERNAL_SERVER_ERROR);
                         http_request_free(&req);
                         rb_free(&rb);
                         return;
@@ -539,7 +582,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                     int want = expect_interest(rb.data, req.body_offset);
                     if (want < 0) {
                         log_warn("unsupported Expect header, sending 417");
-                        send_error(client, HTTP_417_EXPECTATION_FAILED);
+                        send_error(&io, HTTP_417_EXPECTATION_FAILED);
                         http_request_free(&req);
                         rb_free(&rb);
                         return;
@@ -553,12 +596,12 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                             req.content_length > (long long)max_body) {
                             log_warn("request exceeds %zu bytes, sending 413",
                                      max_body);
-                            send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                            send_error(&io, HTTP_413_PAYLOAD_TOO_LARGE);
                             http_request_free(&req);
                             rb_free(&rb);
                             return;
                         }
-                        send_continue(client);
+                        send_continue(&io);
                         continue_sent = true;
                     }
                 }
@@ -581,7 +624,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                         if (spill_fd < 0) {
                             log_warn("cannot open spill dir %s, 500",
                                      cfg->body_dir);
-                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            send_error(&io, HTTP_500_INTERNAL_SERVER_ERROR);
                             http_request_free(&req);
                             rb_free(&rb);
                             return;
@@ -593,7 +636,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                             close(spill_fd);
                             unlink(spill_path);
                             xfree(spill_path);
-                            send_error(client, HTTP_500_INTERNAL_SERVER_ERROR);
+                            send_error(&io, HTTP_500_INTERNAL_SERVER_ERROR);
                             http_request_free(&req);
                             rb_free(&rb);
                             return;
@@ -604,12 +647,12 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                     }
 #endif
                     log_warn("request exceeds %zu bytes, sending 413", max_body);
-                    send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                    send_error(&io, HTTP_413_PAYLOAD_TOO_LARGE);
                     http_request_free(&req);
                     rb_free(&rb);
                     return;
                 }
-                if (fill_more(client, &rb, route_timeout_active) != 0) {
+                if (fill_more(&io, &rb, route_timeout_active) != 0) {
                     http_request_free(&req);
                     rb_free(&rb);
                     return;
@@ -628,11 +671,11 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                     http_request_free(&req);
                     if (rb.count >= rb.capacity) {
                         log_warn("request exceeds %zu bytes, sending 413", max_body);
-                        send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                        send_error(&io, HTTP_413_PAYLOAD_TOO_LARGE);
                         rb_free(&rb);
                         return;
                     }
-                    if (fill_more(client, &rb, route_timeout_active) != 0) {
+                    if (fill_more(&io, &rb, route_timeout_active) != 0) {
                         rb_free(&rb);
                         return;
                     }
@@ -641,7 +684,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
                 if (dr < 0) {
                     log_warn("malformed chunked request from client, sending 400");
                     http_request_free(&req);
-                    send_error(client, HTTP_400_BAD_REQUEST);
+                    send_error(&io, HTTP_400_BAD_REQUEST);
                     break;
                 }
             }
@@ -650,7 +693,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
 
         if (pr == REQ_ERROR) {
             log_warn("malformed request from client, sending 400");
-            send_error(client, HTTP_400_BAD_REQUEST);
+            send_error(&io, HTTP_400_BAD_REQUEST);
             break;
         }
 
@@ -667,14 +710,14 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
             if (drc == -1) {
                 log_warn("malformed gzip request body, sending 400");
                 http_request_free(&req);
-                send_error(client, HTTP_400_BAD_REQUEST);
+                send_error(&io, HTTP_400_BAD_REQUEST);
                 break;
             }
             if (drc == -2) {
                 log_warn("decompressed body exceeds %zu bytes, sending 413",
                          max_inflated);
                 http_request_free(&req);
-                send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                send_error(&io, HTTP_413_PAYLOAD_TOO_LARGE);
                 break;
             }
             req.body_heap = infl;
@@ -696,7 +739,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         // and leftover buffered bytes to the app, then close when it returns.
         // this connection serves no further HTTP requests after the handoff.
         if (res.upgrade_fn != NULL) {
-            handle_upgrade(client, &res, &rb, consumed);
+            handle_upgrade(&io, &res, &rb, consumed);
             http_request_free(&req);
             http_response_free(&res);
             rb_free(&rb);
@@ -705,9 +748,9 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
 
         long long wire_bytes;
         if (res.stream_fn != NULL || res.stream_chunk_count > 0) {
-            wire_bytes = send_stream(client, &res, !is_head);
+            wire_bytes = send_stream(&io, &res, !is_head);
         } else {
-            send_wire(client, &res);
+            send_wire(&io, &res);
             wire_bytes = is_head ? 0 : (long long)res.body.count;
         }
         log_access(&req, &res, wire_bytes);
@@ -715,10 +758,10 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         // apply the matched route's timeout for the next request on this
         // keep-alive connection so a slow client hits 504 instead of 408
         if (req.route_timeout_ms > 0) {
-            net_set_timeout(client, req.route_timeout_ms);
+            net_set_timeout(io.fd, req.route_timeout_ms);
             route_timeout_active = true;
         } else {
-            net_set_timeout(client, timeout_ms);
+            net_set_timeout(io.fd, timeout_ms);
             route_timeout_active = false;
         }
 
@@ -734,6 +777,16 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
     rb_free(&rb);
 }
 
+void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
+                                  void *user_data, const Http_Server_Config *cfg)
+{
+    // plaintext: the public convenience entry point served every
+    // connection without a TLS session; the accept loop hands the
+    // TLS-wrapped variant to serve_connection directly
+    Http_Io io = {client, NULL};
+    serve_connection(io, handler, user_data, cfg);
+}
+
 void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *user_data)
 {
     http_serve_connection_config(client, handler, user_data, NULL);
@@ -744,6 +797,7 @@ void http_serve_connection(Socket_Handle client, Http_Handler_Fn handler, void *
 // in flight at once. each job owns its socket and is freed by the worker.
 typedef struct {
     Socket_Handle client;
+    void *tls_ctx;          // non-NULL: this listener negotiates TLS first
     Http_Handler_Fn handler;
     void *user_data;
     Http_Server_Config cfg; // copied per job so the worker applies it
@@ -753,8 +807,22 @@ static void connection_worker(void *arg)
 {
     Connection_Job *job = arg;
     log_info("client connected");
-    http_serve_connection_config(job->client, job->handler, job->user_data, &job->cfg);
-    net_close(job->client);
+    Http_Io io = {job->client, NULL};
+    // an encrypted listener greets the peer with a TLS handshake before any
+    // HTTP byte; a handshake that never completes is just a dead socket to
+    // drop. the fd already carries the read timeout, bounding a slowloris
+    // against the handshake itself.
+    if (job->tls_ctx != NULL) {
+        io.ssl = tls_accept_client(job->tls_ctx, job->client);
+        if (io.ssl == NULL) {
+            log_warn("TLS handshake failed, dropping connection");
+            net_close(job->client);
+            xfree(job);
+            return;
+        }
+    }
+    serve_connection(io, job->handler, job->user_data, &job->cfg);
+    io_close(&io);
     log_info("client done");
     xfree(job);
 }
@@ -762,6 +830,25 @@ static void connection_worker(void *arg)
 int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler,
                       void *user_data, const Http_Server_Config *cfg)
 {
+    // TLS: when the config names a chain cert and private key, every
+    // connection the accept loop hands out is wrapped in a TLS session by
+    // the worker before it serves HTTP. the context is built once here and
+    // shared read-only across all workers.
+    void *tls_ctx = NULL;
+    if (cfg != NULL && cfg->tls_cert != NULL && cfg->tls_key != NULL) {
+        if (!tls_available()) {
+            log_error("TLS requested but the server was built without OpenSSL");
+            return -1;
+        }
+        char tls_err[256];
+        tls_ctx = tls_server_ctx_new(cfg->tls_cert, cfg->tls_key,
+                                     tls_err, sizeof tls_err);
+        if (tls_ctx == NULL) {
+            log_error("cannot enable TLS: %s", tls_err);
+            return -1;
+        }
+        log_info("TLS enabled, cert %s", cfg->tls_cert);
+    }
 #ifdef _WIN32
     // TODO: a graceful-stop flag on Windows too, via a console ctrl handler
 #else
@@ -803,6 +890,7 @@ int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler,
 
         Connection_Job *job = xmalloc(sizeof *job);
         job->client = client;
+        job->tls_ctx = tls_ctx;
         job->handler = handler;
         job->user_data = user_data;
         job->cfg = cfg != NULL ? *cfg : (Http_Server_Config){0};
@@ -819,6 +907,7 @@ int http_serve_config(Socket_Handle listener, Http_Handler_Fn handler,
     log_info("shutting down: draining %zu queued jobs", pool.queued);
     thread_pool_wait(&pool);
     thread_pool_free(&pool);
+    tls_server_ctx_free(tls_ctx);
     return 0;
 }
 

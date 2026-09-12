@@ -18,6 +18,9 @@ typedef struct {
     const char *body_dir;        // temp dir for oversized bodies, NULL = 413
     size_t max_inflated;         // decompressed-body cap for Content-Encoding:
                                  // gzip uploads, 0 = default (128 MiB)
+    const char *tls_cert;        // PEM chain cert for HTTPS; must also set
+                                 // tls_key or TLS stays off
+    const char *tls_key;         // PEM private key matching tls_cert
     unsigned long io_timeout_ms; // per-read deadline, stalled clients get 408
     size_t workers;              // accept-loop worker threads, 0 = auto
 } Http_Server_Config;
