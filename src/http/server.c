@@ -271,6 +271,62 @@ static bool conn_keep_alive(Http_Request *req)
     return !close && (http11 || keep);
 }
 
+static bool sv_ieq(const char *a, size_t an, const char *b, size_t bn)
+{
+    if (an != bn) {
+        return false;
+    }
+    for (size_t i = 0; i < an; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// RFC 9110 wants a request that says "Expect: 100-continue" answered with
+// an interim 100 Continue before the body is sent, and an unsupported
+// expectation with 417 Expectation Failed. the request parser frees a
+// request's parsed headers whenever the declared body is still short, so
+// this reads the raw header block out of the staging buffer (the range
+// req->body_offset covers) rather than the live header array. returns 1
+// when the client is holding its body for a 100, -1 when Expect is present
+// but names something we do not know, and 0 when there is no Expect header.
+static int expect_interest(const char *head, size_t len)
+{
+    static const char name[] = "Expect:";
+    static const char want[] = "100-continue";
+    size_t name_len = strlen(name);
+    String_View blk = {head, len};
+    sv_chop_by_delim(&blk, '\n'); // skip the request line, not a header
+    while (blk.count > 0) {
+        String_View line = sv_chop_by_delim(&blk, '\n');
+        if (line.count >= 2 && line.data[line.count - 2] == '\r') {
+            line.count -= 2;
+        }
+        if (sv_trim(line).count == 0) {
+            continue; // blank line: header block is over
+        }
+        if (line.count < name_len ||
+            !sv_ieq(line.data, name_len, name, name_len)) {
+            continue;
+        }
+        String_View value = sv_trim(
+            (String_View){line.data + name_len, line.count - name_len});
+        if (sv_ieq(value.data, value.count, want, sizeof(want) - 1)) {
+            return 1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static void send_continue(Socket_Handle client)
+{
+    static const char interim[] = "HTTP/1.1 100 Continue\r\n\r\n";
+    net_send_all(client, interim, sizeof interim - 1);
+}
+
 #ifndef _WIN32
 // creates a fresh temp file inside dir for spilling an oversized request
 // body and hands back its fd and (heap) path, or -1 when the directory is
@@ -374,6 +430,9 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
         Request_Parse_Result pr;
         size_t consumed = 0;
         Http_Request req;
+        // a 100 Continue goes out at most once per request, only after the
+        // header block parsed and only when the client asked for it
+        bool continue_sent = false;
 
         // fill the buffer until a whole request is staged; pipelined bytes
         // already buffered just parse without another recv
@@ -467,6 +526,38 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
 
             pr = http_request_parse_adv(&req, rb_view(&rb), &consumed);
             if (pr == REQ_INCOMPLETE) {
+                // req->body_offset is nonzero once the header block parsed,
+                // so the Expect handshake with the client can begin. a client
+                // holding its body for the 100 is unblocked the moment this
+                // request is accepted; one announcing an expectation this
+                // implementation does not support is turned away with 417.
+                if (!continue_sent && req.body_offset > 0) {
+                    int want = expect_interest(rb.data, req.body_offset);
+                    if (want < 0) {
+                        log_warn("unsupported Expect header, sending 417");
+                        send_error(client, HTTP_417_EXPECTATION_FAILED);
+                        http_request_free(&req);
+                        rb_free(&rb);
+                        return;
+                    }
+                    if (want > 0) {
+                        // a declared body this server would reject anyway is
+                        // answered with the final 413 right now, before the
+                        // client transmits a single body byte; otherwise the
+                        // interim 100 unblocks the sender to proceed
+                        if (cfg->body_dir == NULL &&
+                            req.content_length > (long long)max_body) {
+                            log_warn("request exceeds %zu bytes, sending 413",
+                                     max_body);
+                            send_error(client, HTTP_413_PAYLOAD_TOO_LARGE);
+                            http_request_free(&req);
+                            rb_free(&rb);
+                            return;
+                        }
+                        send_continue(client);
+                        continue_sent = true;
+                    }
+                }
                 if (rb.count >= rb.capacity) {
 #ifndef _WIN32
                     // a declared length past the in-RAM cap starts a spill

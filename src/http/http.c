@@ -27,6 +27,7 @@ const char *http_status_reason(Http_Status status)
     case HTTP_413_PAYLOAD_TOO_LARGE: return "Payload Too Large";
     case HTTP_415_UNSUPPORTED_MEDIA_TYPE: return "Unsupported Media Type";
     case HTTP_416_RANGE_NOT_SATISFIABLE: return "Range Not Satisfiable";
+    case HTTP_417_EXPECTATION_FAILED: return "Expectation Failed";
     case HTTP_429_TOO_MANY_REQUESTS: return "Too Many Requests";
     case HTTP_500_INTERNAL_SERVER_ERROR: return "Internal Server Error";
     case HTTP_501_NOT_IMPLEMENTED: return "Not Implemented";

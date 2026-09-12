@@ -173,6 +173,68 @@ static void *close_dummies_after_a_second(void *arg)
     return NULL;
 }
 
+// two-phase request: headers with Expect: 100-continue go out first and the
+// body only after the server's interim reply, the way a real uploading
+// client behaves. hands back whether the interim 100 actually arrived before
+// the body; returns a heap copy of everything the server sent. a server that
+// rejected the request early (413/417) closes without the body being
+// transmitted here at all, which is exactly what the test asserts.
+static char *post_expect(int port, const char *path, size_t len,
+                         const char *expect_value, bool *got_interim)
+{
+    Socket_Handle s = net_connect("127.0.0.1", port);
+    if (s == -1) {
+        return NULL;
+    }
+    net_set_timeout(s, 3000);
+    char head[256];
+    int hl = snprintf(head, sizeof head,
+                      "POST %s HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Content-Length: %zu\r\n"
+                      "Expect: %s\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      path, len, expect_value);
+    if (net_send_all(s, head, hl) != hl) {
+        net_close(s);
+        return NULL;
+    }
+
+    size_t cap = (size_t)hl + len + 2048;
+    char *buf = malloc(cap);
+    size_t got = 0;
+    long n = net_recv(s, buf + got, cap - got - 1);
+    if (n <= 0) {
+        net_close(s);
+        free(buf);
+        return NULL;
+    }
+    got += (size_t)n;
+    *got_interim = n >= 21 && strncmp(buf, "HTTP/1.1 100 Continue", 21) == 0;
+    if (*got_interim) {
+        // the server green-lit the upload: stream the body, then read the
+        // final answer
+        char *body = malloc(len);
+        for (size_t i = 0; i < len; i++) {
+            body[i] = (char)((0xA1 + i) & 0xff);
+        }
+        if (net_send_all(s, body, (long)len) != (long)len) {
+            free(body);
+            net_close(s);
+            free(buf);
+            return NULL;
+        }
+        free(body);
+    }
+    while (got < cap - 1 && (n = net_recv(s, buf + got, cap - got - 1)) > 0) {
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    net_close(s);
+    return buf;
+}
+
 int main(void)
 {
     if (net_init() != 0) {
@@ -454,6 +516,135 @@ int main(void)
 
     if (!ok4) {
         fprintf(stderr, "spill-to-disk test failed\n");
+        net_cleanup();
+        return 1;
+    }
+
+    // --- Expect: 100-continue ---
+    // a tight 4 KiB cap with no spill dir: a waiting client must be answered
+    // with the interim 100 before its body is transmitted, an oversized
+    // upload must be rejected 413 before a single body byte is sent, an
+    // unsupported expectation must earn a 417, and a plain request with no
+    // Expect header must never see a 100 at all
+    Socket_Handle srv5 = net_listen(0);
+    if (srv5 == -1) {
+        fprintf(stderr, "fifth listen failed: %s\n", net_error_string());
+        net_cleanup();
+        return 1;
+    }
+    int port5 = net_bound_port(srv5);
+    Http_Server_Config cfg5;
+    memset(&cfg5, 0, sizeof cfg5);
+    cfg5.max_body = 4096;
+    cfg5.io_timeout_ms = 1500;
+    cfg5.workers = 2;
+    pid_t child5 = fork();
+    if (child5 == 0) {
+        log_set_level(LOG_WARN);
+        http_serve_config(srv5, echo_body_fn, NULL, &cfg5);
+        _exit(0);
+    }
+
+    bool interim = false;
+    resp = post_expect(port5, "/expect", 16, "100-continue", &interim);
+    int ok5 = resp != NULL && interim &&
+              strstr(resp, "HTTP/1.1 100 Continue") != NULL &&
+              strstr(resp, "HTTP/1.1 200 OK") != NULL;
+    free(resp);
+
+    // a 64 KiB upload -- far past the 4 KiB cap -- is rejected before the
+    // body would ever be sent; the client never uploads anything
+    resp = post_expect(port5, "/huge", 65536, "100-continue", &interim);
+    ok5 = ok5 && resp != NULL && !interim &&
+          strstr(resp, "HTTP/1.1 413") != NULL &&
+          strstr(resp, "100 Continue") == NULL &&
+          strlen(resp) < 1024;
+    free(resp);
+
+    resp = post_expect(port5, "/other", 16, "something-else", &interim);
+    ok5 = ok5 && resp != NULL && !interim &&
+          strstr(resp, "HTTP/1.1 417") != NULL;
+    free(resp);
+
+    // no Expect header means no interim response, just the ordinary answer
+    resp = post_body(port5, "/", 800);
+    ok5 = ok5 && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+          strstr(resp, "100 Continue") == NULL;
+    free(resp);
+
+    kill(child5, SIGTERM);
+    waitpid(child5, NULL, 0);
+    net_close(srv5);
+    if (!ok5) {
+        fprintf(stderr, "Expect: 100-continue test failed\n");
+        net_cleanup();
+        return 1;
+    }
+
+    // the same handshake must survive the spill route: a 256 KiB upload past
+    // the 64 KiB cap gets the interim 100, then streams to disk and comes
+    // back byte-for-byte identical
+    char spill_tmpdir2[] = "/tmp/cweb-spill-e2-XXXXXX";
+    if (mkdtemp(spill_tmpdir2) == NULL) {
+        fprintf(stderr, "mkdtemp failed\n");
+        net_cleanup();
+        return 1;
+    }
+    Socket_Handle srv6 = net_listen(0);
+    if (srv6 == -1) {
+        fprintf(stderr, "sixth listen failed: %s\n", net_error_string());
+        rmdir(spill_tmpdir2);
+        net_cleanup();
+        return 1;
+    }
+    int port6 = net_bound_port(srv6);
+    Http_Server_Config cfg6;
+    memset(&cfg6, 0, sizeof cfg6);
+    cfg6.max_body = 64 * 1024;
+    cfg6.body_dir = spill_tmpdir2;
+    cfg6.io_timeout_ms = 3000;
+    pid_t child6 = fork();
+    if (child6 == 0) {
+        log_set_level(LOG_WARN);
+        http_serve_config(srv6, echo_body_fn, NULL, &cfg6);
+        _exit(0);
+    }
+
+    resp = post_expect(port6, "/big", 256 * 1024, "100-continue", &interim);
+    int ok6 = resp != NULL && interim &&
+              strstr(resp, "HTTP/1.1 100 Continue") != NULL &&
+              strstr(resp, "HTTP/1.1 200 OK") != NULL;
+    if (ok6 && resp != NULL) {
+        long echo_len = -1;
+        char *cl = strstr(resp, "Content-Length:");
+        if (cl != NULL) {
+            echo_len = strtol(cl + strlen("Content-Length:"), NULL, 10);
+        }
+        // resp carries the interim 100 followed by the real response, so
+        // the body starts after the *second* header/body separator
+        const char *sep1 = strstr(resp, "\r\n\r\n");
+        const char *sep2 = sep1 != NULL ? strstr(sep1 + 4, "\r\n\r\n") : NULL;
+        const char *body_start = sep2 != NULL ? sep2 + 4 : NULL;
+        if (echo_len != 256 * 1024 || body_start == NULL) {
+            ok6 = 0;
+        } else {
+            for (size_t i = 0; i < 256 * 1024; i++) {
+                if ((unsigned char)body_start[i] !=
+                    (unsigned char)((0xA1 + i) & 0xff)) {
+                    ok6 = 0;
+                    break;
+                }
+            }
+        }
+    }
+    free(resp);
+
+    kill(child6, SIGTERM);
+    waitpid(child6, NULL, 0);
+    net_close(srv6);
+    rmdir(spill_tmpdir2);
+    if (!ok6) {
+        fprintf(stderr, "Expect: 100-continue over the spill route failed\n");
         net_cleanup();
         return 1;
     }
