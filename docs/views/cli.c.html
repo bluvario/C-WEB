@@ -10,7 +10,7 @@ apps, and runs servers with live reload.</p>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr><td><code>cweb build VIEWS OUT [ROOT [STATIC]]</code></td><td>Compile every page under <code>VIEWS</code> into C, emit <code>OUT/main.c</code> and link <code>OUT/server</code>.</td></tr>
   <tr><td><code>cweb serve [--watch] VIEWS [PORT [ROOT [STATIC]]] [FLAGS...]</code></td><td>Build into a scratch dir and run it. With <code>--watch</code>, rebuild and restart on any file change.</td></tr>
-  <tr><td><code>cweb new APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial and a stylesheet.</td></tr>
+  <tr><td><code>cweb new [--docker] [--systemd] APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial, a stylesheet and a <code>.gitignore</code>. <code>--docker</code> adds a Dockerfile (build context: the cweb checkout root), <code>--systemd</code> a unit for <code>/opt/APP_DIR</code>.</td></tr>
   <tr><td><code>cweb version</code></td><td>Print the framework version.</td></tr>
 </table>
 
@@ -43,11 +43,12 @@ so both paths honor the same options.</p>
 
 <table>
   <tr><th>Flag</th><th>What it does</th></tr>
-  <tr><td><code>--port N</code></td><td>Listen port, default 8080.</td></tr>
+  <tr><td><code>--port N</code></td><td>Listen port; default 8080, or the <code>PORT</code> environment variable when <code>--port</code> is absent.</td></tr>
+  <tr><td><code>--env-file FILE</code></td><td>Load KEY=VALUE defaults from FILE before the flags below are read (existing environment wins). Conveniently supplies <code>PORT</code>, <code>CWEB_DB</code> and any variable a page reads with <code>getenv</code>; explicit flags still override.</td></tr>
   <tr><td><code>--rate N</code></td><td>Per-address budget of N requests a minute (429 past it).</td></tr>
   <tr><td><code>--secure</code></td><td>Hardening headers on every response.</td></tr>
   <tr><td><code>--gzip</code></td><td>Compress compressible response bodies.</td></tr>
-  <tr><td><code>--db PATH</code></td><td>Open the file-backed key/value store at PATH, exposed to pages via <code>cweb_database()</code>. Sessions persist to it too.</td></tr>
+  <tr><td><code>--db PATH</code></td><td>Open the file-backed key/value store at PATH, exposed to pages via <code>cweb_database()</code>. Sessions persist to it too. Defaults to the <code>CWEB_DB</code> environment variable when <code>--db</code> is absent.</td></tr>
   <tr><td><code>--static-cache SECONDS</code></td><td>Cache-Control max-age on static files; ETag/Last-Modified still answer 304.</td></tr>
   <tr><td><code>--etag</code></td><td>Strong ETag (SHA-256) on every dynamic response; matching If-None-Match gets 304.</td></tr>
   <tr><td><code>--request-id</code></td><td>Stamp every response (and <code>req->request_id</code>) with a unique trace id.</td></tr>

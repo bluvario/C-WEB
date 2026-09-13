@@ -74,10 +74,18 @@ typedef struct {
     String_View request_id;
 
     // authenticated username, set by http_basic_auth_middleware when it runs
-    // and the request carried valid credentials. same ownership and lifetime
-    // as request_id: heap storage released by http_request_free, empty when
-    // the guard (or the chain it guards) did not run.
+    // and the request carried valid credentials, or by
+    // http_session_auth_middleware resolving an authenticated session. same
+    // ownership and lifetime as request_id: heap storage released by
+    // http_request_free, empty when the guard (or the chain it guards) did
+    // not run.
     String_View auth_user;
+
+    // comma-separated role list, set by http_session_auth_middleware from a
+    // session's roles key, consumed by http_require_auth_middleware. same
+    // heap ownership and lifetime as auth_user. empty when no session identity
+    // was resolved.
+    String_View auth_roles;
 
     Http_Header_Array headers;
 

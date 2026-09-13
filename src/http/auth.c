@@ -188,3 +188,98 @@ void http_basic_auth_middleware(Http_Request *req, Http_Response *res,
 
     next(req, res, next_data);
 }
+
+// copies a session value into a request-owned view, the same heap contract as
+// request_id (freed by http_request_free). only writes when the view is empty,
+// so a guard that resolves an earlier one (say, Basic auth) is never clobbered.
+static void stash_session_value(String_View *view, const char *value)
+{
+    if (view->count != 0 || value == NULL) {
+        return;
+    }
+    size_t n = strlen(value);
+    char *owned = xmalloc(n + 1);
+    memcpy(owned, value, n + 1);
+    *view = (String_View){owned, n};
+}
+
+void http_session_auth_middleware(Http_Request *req, Http_Response *res,
+                                  void *user_data,
+                                  Http_Handler_Fn next, void *next_data)
+{
+    Http_SessionAuth_Options *opts = user_data;
+
+    // unconfigured is not a guard: no store (or no cookie to look for) means
+    // nothing is resolved and the identity views stay empty
+    if (opts == NULL || opts->store == NULL) {
+        next(req, res, next_data);
+        return;
+    }
+
+    const char *cookie = opts->cookie_name != NULL ? opts->cookie_name : "cweb_session";
+    const char *user_key = opts->session_key != NULL ? opts->session_key : "auth_user";
+    const char *roles_key = opts->roles_key != NULL ? opts->roles_key : "auth_roles";
+
+    Http_Session *sesh = http_session_from_cookie(opts->store, req, cookie);
+    if (sesh != NULL) {
+        stash_session_value(&req->auth_user, http_session_value(sesh, user_key));
+        stash_session_value(&req->auth_roles, http_session_value(sesh, roles_key));
+    }
+
+    next(req, res, next_data);
+}
+
+// is any word in the comma-separated role list equal to one of the required
+// roles? each side is trimmed, so "admin, editor" and "admin,editor" match.
+static int holds_any_role(String_View list, const char **roles, size_t roles_count)
+{
+    while (list.count > 0) {
+        String_View part = sv_trim(sv_chop_by_delim(&list, ','));
+        for (size_t i = 0; i < roles_count; i++) {
+            if (sv_equal(part, sv_from_cstr(roles[i]))) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+void http_require_auth_middleware(Http_Request *req, Http_Response *res,
+                                  void *user_data,
+                                  Http_Handler_Fn next, void *next_data)
+{
+    Http_RequireAuth_Options *opts = user_data;
+
+    // unconfigured is not a guard
+    if (opts == NULL) {
+        next(req, res, next_data);
+        return;
+    }
+
+    if (req->auth_user.count == 0) {
+        if (opts->login_path != NULL) {
+            http_response_redirect(res, HTTP_303_SEE_OTHER, opts->login_path);
+        } else {
+            http_response_set_status(res, HTTP_401_UNAUTHORIZED);
+            http_response_set_header(res, "Content-Type",
+                                     "text/plain; charset=utf-8");
+            http_response_add_body_cstr(res, "login required\n");
+        }
+        return;
+    }
+
+    if (opts->roles != NULL && opts->roles_count > 0 &&
+        !holds_any_role(req->auth_roles, opts->roles, opts->roles_count)) {
+        if (opts->forbidden_path != NULL) {
+            http_response_redirect(res, HTTP_303_SEE_OTHER, opts->forbidden_path);
+        } else {
+            http_response_set_status(res, HTTP_403_FORBIDDEN);
+            http_response_set_header(res, "Content-Type",
+                                     "text/plain; charset=utf-8");
+            http_response_add_body_cstr(res, "forbidden\n");
+        }
+        return;
+    }
+
+    next(req, res, next_data);
+}

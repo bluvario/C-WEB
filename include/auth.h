@@ -3,6 +3,7 @@
 
 #include "middleware.h"
 #include "response.h"
+#include "session.h"
 #include "sv.h"
 
 // decodes the credentials in an "Authorization: Basic <base64>" header value.
@@ -46,5 +47,73 @@ typedef struct {
 void http_basic_auth_middleware(Http_Request *req, Http_Response *res,
                                 void *user_data,
                                 Http_Handler_Fn next, void *next_data);
+
+// ---------------------------------------------------------------------------
+// session-based authentication and authorization
+// ---------------------------------------------------------------------------
+//
+// the pair of middlewares below turns the server-side session store into an
+// authentication source, so an app's own login form can gate the whole chain
+// instead of relying on HTTP Basic. together they replace — for most apps —
+// hand-writing "load session, check the user field" at the top of every page:
+//
+//   Http_SessionAuth_Options sa = { .store = &store, .cookie_name = "sesh" };
+//   http_middleware_add(&chain, http_session_auth_middleware, &sa);
+//   Http_RequireAuth_Options ra = { .roles = roles, .roles_count = n };
+//   http_middleware_add(&chain, http_require_auth_middleware, &ra);
+//
+// the session-auth middleware is expected to run early in the chain; the
+// require-auth guard runs after it and blocks before the handler.
+
+// options for http_session_auth_middleware; pass a pointer as user_data.
+// a NULL store (or a NULL/empty cookie_name) disables the middleware and
+// everything passes through untouched.
+typedef struct {
+    // the shared session store the cookie token resolves against; required.
+    Http_Session_Store *store;
+    // the cookie name holding the session token. NULL defaults to "cweb_session".
+    const char *cookie_name;
+    // which session key holds the username and the comma-separated role list;
+    // NULL defaults to "auth_user" and "auth_roles".
+    const char *session_key;
+    const char *roles_key;
+} Http_SessionAuth_Options;
+
+// resolves the request's session cookie and copies its identity into the
+// request for later middleware and handlers:
+//   * the session key's value becomes req->auth_user (owned by the request,
+//     freed with the request, empty when no session or no user is stored);
+//   * the roles key's value becomes req->auth_roles, a comma-separated list
+//     with the same ownership rules (empty when absent);
+//   * no session, or no stored identity, leaves both views empty and never
+//     blocks. this middleware only annotates; gating is require-auth's job.
+void http_session_auth_middleware(Http_Request *req, Http_Response *res,
+                                  void *user_data,
+                                  Http_Handler_Fn next, void *next_data);
+
+// options for http_require_auth_middleware; pass a pointer as user_data.
+typedef struct {
+    // roles the caller must hold; the caller needs only one of them ("any-of").
+    // NULL with roles_count == 0 simply requires any authenticated user.
+    const char **roles;
+    size_t roles_count;
+    // when an unauthenticated request arrives, redirect here with 303 instead
+    // of answering 401. NULL (the default) answers 401 + a plain-body hint.
+    const char *login_path;
+    // when an authenticated caller lacks every required role, redirect here
+    // with 303 instead of answering 403. NULL answers 403.
+    const char *forbidden_path;
+} Http_RequireAuth_Options;
+
+// authorization guard: refuses the request unless req->auth_user names someone
+// (set by http_session_auth_middleware earlier in the chain) holding one of
+// the required roles. blocking answers are 401-with-login-hint (or a 303 to
+// opts->login_path) when unauthenticated and 403 (or a 303 to
+// opts->forbidden_path) when authenticated but role-less, and the rest of the
+// chain — including the handler — is skipped. opts NULL disables the guard
+// and lets everything through.
+void http_require_auth_middleware(Http_Request *req, Http_Response *res,
+                                  void *user_data,
+                                  Http_Handler_Fn next, void *next_data);
 
 #endif

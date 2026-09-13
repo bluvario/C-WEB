@@ -164,6 +164,9 @@ the names matter; the comments in each header carry the details.</p>
 <code>int http_basic_auth_parse(String_View authorization, char *user, size_t user_size, char *pass, size_t pass_size);</code><br>
 <code>void http_response_require_basic_auth(Http_Response *res, const char *realm);</code><br>
 <code>void http_basic_auth_middleware(...);</code><br>
+<code>void http_session_auth_middleware(...) / http_require_auth_middleware(...);</code> — session-backed
+identity from the store's <code>auth_user</code> and <code>auth_roles</code> keys; the guard
+answers 401/403 (or 303 redirects to login/forbidden paths) by role<br>
 <code>void http_request_signature_compute(...); int http_request_signature_verify(Http_Request *req, const char *secret, ...);</code><br>
 <code>void http_signature_middleware(...);</code><br>
 <code>void http_request_id_middleware(...);</code><br>
@@ -246,6 +249,8 @@ the names matter; the comments in each header carry the details.</p>
 <code>char *file_read_all(const char *path, char **out, size_t *out_len);</code> — file.h<br>
 <code>void base64_encode_into / int base64_decode_into (...);</code> — base64.h<br>
 <code>void sha256(...) / hmac_sha256(...) / hmac_sha256_hex(...) / secure_byte_equal(...);</code> — hmac.h<br>
+<code>int cweb_password_hash(const char *pw, unsigned iters, char *out, size_t out_sz) / cweb_password_verify(const char *pw, const char *encoded) / cweb_secure_random_bytes(...);</code> — password.h<br>
+<code>int cweb_env_file(const char *path);</code> — env.h: load KEY=VALUE defaults into the environment (existing wins)<br>
 <code>char *http_date_rfc7231/time_t http_date_parse/time_mono_ms(...);</code> — date.h<br>
 <code>int thread_init / thread_join / thread_detach / thread_hardware_parallelism (...);</code> — thread.h<br>
 <code>void *xmalloc/xcalloc/xrealloc, xfree(void*)</code> — xmem.h

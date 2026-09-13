@@ -111,6 +111,30 @@ right:</p>
   &lt;p&gt;Hello &lt;?h= req-&gt;auth_user ?&gt;&lt;/p&gt;
 &lt;?c } ?&gt;</code></pre>
 
+<h2>Session-based login guards</h2>
+
+<p>For form-driven logins, two middlewares turn the session store into an
+authentication source: <code>http_session_auth_middleware</code> copies the
+stored <code>auth_user</code> (and a comma-separated <code>auth_roles</code>)
+into the request without blocking, and <code>http_require_auth_middleware</code>
+gates the chain behind them — 401 (or a 303 to a login path) for anonymous
+callers, 403 (or a 303 to a forbidden path) for logged-in callers who lack any
+required role. Store the password with <code>cweb_password_hash</code> at signup
+and check logins with <code>cweb_password_verify</code> (PBKDF2-HMAC-SHA256, no
+extra dependency):</p>
+
+<pre><code>&lt;?c
+  Http_SessionAuth_Options sa = { .store = &amp;store, .cookie_name = "sesh" };
+  http_middleware_add(&amp;chain, http_session_auth_middleware, &amp;sa);
+  const char *roles[] = { "admin" };
+  Http_RequireAuth_Options ra = { .roles = roles, .roles_count = 1 };
+  http_middleware_add(&amp;chain, http_require_auth_middleware, &amp;ra);
+?&gt;</code></pre>
+
+<p>The setup is identical inside a page file or a hand-written <code>main.c</code>.
+Pages can then read <code>req-&gt;auth_roles</code> with the same ownership rules
+as <code>req-&gt;auth_user</code>.</p>
+
 <h2>Next</h2>
 
 <ul>

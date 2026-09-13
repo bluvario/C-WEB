@@ -358,6 +358,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"etag.h\"\n"
         "#include \"request_id.h\"\n"
         "#include \"auth.h\"\n"
+        "#include \"env.h\"\n"
         "#include \"ip.h\"\n"
         "#include \"client_ip.h\"\n"
         "#include \"log.h\"\n"
@@ -399,10 +400,14 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// run mints a self-signed pair under ~/.cweb and reuses it after,\n"
         "// so the thumbprint stays stable across restarts. these buffers hold\n"
         "// the resolved paths while the process lives.\n"
-        "static int cweb_tls = 0;\n"
-        "static char cweb_tls_autocert[4096];\n"
-        "static char cweb_tls_autokey[4096];\n"
-        "\n"
+"static int cweb_tls = 0;\n"
+         "static char cweb_tls_autocert[4096];\n"
+         "static char cweb_tls_autokey[4096];\n"
+         "\n"
+         "// KEY=VALUE file loaded by --env-file before the flags are parsed,\n"
+         "// so defaults (PORT, CWEB_DB, ...) can be checked in; NULL = none\n"
+         "static const char *cweb_env_file_path = NULL;\n"
+         "\n"
         "// shared secret for HMAC-signed requests, from --signature-secret;\n"
         "// NULL keeps request signing off entirely\n"
         "static const char *cweb_signature_secret = NULL;\n"
@@ -548,6 +553,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs("    if (cweb_body_dir != NULL) "
           "printf(\"body-dir: %s\\n\", cweb_body_dir);\n",
           f);
+    fputs("    if (cweb_env_file_path != NULL) "
+          "printf(\"env-file: %s\\n\", cweb_env_file_path);\n",
+          f);
     fputs("    if (cweb_tls_cert != NULL && cweb_tls_key != NULL) "
           "printf(\"tls-cert: %s\\n\", cweb_tls_cert);\n",
           f);
@@ -659,11 +667,30 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs(
         "int main(int argc, char **argv)\n"
         "{\n"
-        "    int port = 8080;\n"
+        "    // --env-file loads KEY=VALUE defaults before any other flag is\n"
+        "    // read, so PORT and CWEB_DB (and any var a page reads with\n"
+        "    // getenv) can come from a checked-in file while the explicit\n"
+        "    // flags below still win. existing environment beats the file.\n"
+        "    for (int i = 1; i < argc; i++) {\n"
+        "        if (strcmp(argv[i], \"--env-file\") == 0 && i + 1 < argc) {\n"
+        "            if (cweb_env_file(argv[i + 1]) != 0) {\n"
+        "                fprintf(stderr, \"cweb: cannot load env file %s\\n\", argv[i + 1]);\n"
+        "                return 2;\n"
+        "            }\n"
+        "            cweb_env_file_path = argv[i + 1];\n"
+        "        }\n"
+        "    }\n"
+        "    const char *env_port = getenv(\"PORT\");\n"
+        "    int port = (env_port != NULL && env_port[0] != '\\0')\n"
+        "                   ? atoi(env_port)\n"
+        "                   : 8080;\n"
+        "    const char *env_db = getenv(\"CWEB_DB\");\n"
+        "    const char *db_path = (env_db != NULL && env_db[0] != '\\0')\n"
+        "                              ? env_db\n"
+        "                              : NULL;\n"
         "    int rate_per_min = 0;\n"
         "    int secure = 0;\n"
         "    int gzip = 0;\n"
-        "    const char *db_path = NULL;\n"
         "    const char *log_path = NULL;\n"
         "    for (int i = 1; i < argc; i++) {\n"
         "        if (strcmp(argv[i], \"--port\") == 0 && i + 1 < argc) {\n"
@@ -774,6 +801,9 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        } else if (strcmp(argv[i], \"--routes\") == 0) {\n"
         "            list_routes();\n"
         "            return 0;\n"
+        "        } else if (strcmp(argv[i], \"--env-file\") == 0) {\n"
+        "            // already loaded up front; here it just skips its value\n"
+        "            i++;\n"
         "        } else {\n"
         "            fprintf(stderr, \"cweb: unknown option %s\\n\", argv[i]);\n"
         "            return 2;\n"
@@ -1379,23 +1409,40 @@ static int dir_has_entries(const char *path)
 
 static int cmd_new(int argc, char **argv)
 {
-    if (argc < 3) {
-        return die("new needs an app dir (cweb new APP_DIR)");
+    const char *app_dir = NULL;
+    int docker = 0, systemd = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--docker") == 0) {
+            docker = 1;
+        } else if (strcmp(argv[i], "--systemd") == 0) {
+            systemd = 1;
+        } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            char msg[512];
+            snprintf(msg, sizeof msg, "new: unknown option %s", argv[i]);
+            return die(msg);
+        } else if (app_dir == NULL) {
+            app_dir = argv[i];
+        } else {
+            return die("new: too many app dirs");
+        }
+    }
+    if (app_dir == NULL) {
+        return die("new needs an app dir (cweb new [--docker] [--systemd] APP_DIR)");
     }
     // refuse only when a non-empty dir occupies the spot; an empty dir is fine
     struct stat st;
-    if (stat(argv[2], &st) == 0 && dir_has_entries(argv[2])) {
+    if (stat(app_dir, &st) == 0 && dir_has_entries(app_dir)) {
         return die("app dir exists and is not empty");
     }
 
     char app[4096], sub[512];
-    mkdir_p(argv[2]);                     // creates the app dir
-    path_join(sub, sizeof sub, argv[2], "views/partials");
+    mkdir_p(app_dir);                     // creates the app dir
+    path_join(sub, sizeof sub, app_dir, "views/partials");
     mkdir_p(sub);                         // creates views and views/partials
-    path_join(sub, sizeof sub, argv[2], "static");
+    path_join(sub, sizeof sub, app_dir, "static");
     mkdir_p(sub);
 
-    path_join(app, sizeof app, argv[2], "views/layout.c.html");
+    path_join(app, sizeof app, app_dir, "views/layout.c.html");
     if (write_file(app,
         "<!DOCTYPE html>\n"
         "<html lang=\"en\">\n"
@@ -1414,26 +1461,26 @@ static int cmd_new(int argc, char **argv)
         "</html>\n") != 0) {
         return die("cannot write views/layout.c.html");
     }
-    path_join(app, sizeof app, argv[2], "views/index.c.html");
+    path_join(app, sizeof app, app_dir, "views/index.c.html");
     if (write_file(app,
         "<p>Built by <strong>cweb build</strong>. Edit this page at\n"
         "  <code>views/index.c.html</code>.</p>\n"
         "  <p>Serve it again with <code>cweb serve views 8080 . static</code>.</p>\n") != 0) {
         return die("cannot write views/index.c.html");
     }
-    path_join(app, sizeof app, argv[2], "views/404.c.html");
+    path_join(app, sizeof app, app_dir, "views/404.c.html");
     if (write_file(app,
         "<h1>404 · no such page</h1>\n"
         "  <p>Nothing is served at this address.</p>\n"
         "  <p><a href=\"/\">Back to the start</a></p>\n") != 0) {
         return die("cannot write views/404.c.html");
     }
-    path_join(app, sizeof app, argv[2], "views/partials/footer.c.html");
+    path_join(app, sizeof app, app_dir, "views/partials/footer.c.html");
     if (write_file(app,
         "<footer>Powered by C-WEB</footer>\n") != 0) {
         return die("cannot write views/partials/footer.c.html");
     }
-    path_join(app, sizeof app, argv[2], "static/style.css");
+    path_join(app, sizeof app, app_dir, "static/style.css");
     if (write_file(app,
         "body {\n"
         "  font-family: system-ui, sans-serif;\n"
@@ -1453,6 +1500,70 @@ static int cmd_new(int argc, char **argv)
         "}\n") != 0) {
         return die("cannot write static/style.css");
     }
+    path_join(app, sizeof app, app_dir, ".gitignore");
+    if (write_file(app,
+        "# cweb build outputs\n"
+        "build/\n"
+        "out/\n"
+        "# state keep sessions can write with --db\n"
+        "*.db\n"
+        "# local environment overrides (PORT, CWEB_DB, ...)\n"
+        ".env\n") != 0) {
+        return die("cannot write .gitignore");
+    }
+
+    if (docker) {
+        // build context must be the cweb checkout root (the dir holding the
+        // Makefile and include/); the app itself lives under ./APP_DIR
+        path_join(app, sizeof app, app_dir, "Dockerfile");
+        char df[2048];
+        int dn = snprintf(df, sizeof df,
+            "# build context: the cweb checkout root, e.g.\n"
+            "#   docker build -f %s/Dockerfile -t cweb-app .\n"
+            "FROM gcc:13-bookworm AS build\n"
+            "WORKDIR /src\n"
+            "COPY . .\n"
+            "RUN make build/libcweb.a\n"
+            "RUN make build/cweb\n"
+            "RUN ./build/cweb build %s/views out . %s/static\n"
+            "\n"
+            "FROM debian:bookworm-slim\n"
+            "WORKDIR /app\n"
+            "COPY --from=build /src/out /app/out\n"
+            "COPY --from=build /src/%s/static /app/static\n"
+            "EXPOSE 8080\n"
+            "CMD [\"/app/out/server\", \"--port\", \"8080\"]\n",
+            app_dir, app_dir, app_dir, app_dir);
+        (void)dn;
+        if (write_file(app, df) != 0) {
+            return die("cannot write Dockerfile");
+        }
+    }
+
+    if (systemd) {
+        path_join(app, sizeof app, app_dir, "cweb.service");
+        char unit[2048];
+        int n = snprintf(unit, sizeof unit,
+            "[Unit]\n"
+            "Description=%s cweb app\n"
+            "After=network.target\n"
+            "\n"
+            "[Service]\n"
+            "WorkingDirectory=/opt/%s\n"
+            "EnvironmentFile=-/etc/%s.env\n"
+            "ExecStart=/opt/%s/server --port 8080\n"
+            "Restart=on-failure\n"
+            "RestartSec=2\n"
+            "DynamicUser=yes\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n",
+            app_dir, app_dir, app_dir, app_dir);
+        (void)n;
+        if (write_file(app, unit) != 0) {
+            return die("cannot write cweb.service");
+        }
+    }
 
     printf("created %s/\n"
            "  views/layout.c.html    document shell wrapping every page\n"
@@ -1460,9 +1571,18 @@ static int cmd_new(int argc, char **argv)
            "  views/404.c.html       custom not-found page\n"
            "  views/partials         reusable fragments, never routes\n"
            "  static/style.css       served from the /* mount\n"
-           "\n"
+           "  .gitignore             keeps build/, out/, *.db and .env out\n",
+           app_dir);
+    if (docker) {
+        printf("  Dockerfile             build context: the cweb checkout root\n");
+    }
+    if (systemd) {
+        printf("  cweb.service           systemd unit (/opt/%s, /etc/%s.env)\n",
+               app_dir, app_dir);
+    }
+    printf("\n"
            "next: cd %s && cweb serve views 8080 . static\n",
-           argv[2], argv[2]);
+           app_dir);
     return 0;
 }
 
@@ -1689,7 +1809,10 @@ static void usage(FILE *f)
         "      build into a scratch dir and run it; --watch rebuilds and\n"
         "      restarts on change; FLAGS pass through to the server\n"
         "      (e.g. --rate 30 --secure --log access.log)\n"
-        "  new APP_DIR                     scaffold a runnable app skeleton\n"
+        "  new [--docker] [--systemd] APP_DIR\n"
+        "      scaffold a runnable app skeleton: views, static/, a .gitignore\n"
+        "      (build/, out/, *.db, .env); --docker also writes a Dockerfile,\n"
+        "      --systemd a cweb.service unit for running it on a VPS\n"
         "  version | --version             print the framework version\n"
         "  help | --help | -h              print this help\n"
         "\n"
@@ -1771,8 +1894,11 @@ static void usage(FILE *f)
         "                                  on a keep-alive connection after serving\n"
         "                                  PATH; a stall then produces 504 instead of\n"
         "                                  the default 408; repeat for more routes\n"
-        "  --routes                         list the routes and the hardening knobs\n"
-        "                                  in effect, then exit without binding\n"
+"  --routes                         list the routes and the hardening knobs\n"
+         "                                  in effect, then exit without binding\n"
+         "  --env-file FILE                  load KEY=VALUE defaults before the flags\n"
+         "                                  below are read; PORT defaults the port,\n"
+         "                                  CWEB_DB the --db path (existing env wins)\n"
         "\n"
         "Run the self-hosting docs site for the full manual: in the checkout,\n"
         "  cweb build docs/views build/docs . docs/static\n"
