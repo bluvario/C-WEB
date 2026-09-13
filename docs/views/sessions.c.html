@@ -135,6 +135,15 @@ extra dependency):</p>
 Pages can then read <code>req-&gt;auth_roles</code> with the same ownership rules
 as <code>req-&gt;auth_user</code>.</p>
 
+<p><strong>Try it without typing:</strong> <code>cweb new --login APP_DIR</code>
+scaffolds a whole account app — signup, login, logout and a private dashboard —
+with users stored under <code>user:&lt;name&gt;</code> as PBKDF2 hashes and an
+hour-long <code>cweb_session</code> cookie as the token. Serve it with
+<code>cweb serve views 8080 . static --db app.db</code>. The logout handler is
+a POST guarded by a CSRF token; the login page rotates its token the moment
+auth succeeds; the dashboard redirects anonymous callers to <code>/login</code> —
+the api.c.html tour right here, running.</p>
+
 <h2>Next</h2>
 
 <ul>

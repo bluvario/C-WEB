@@ -88,6 +88,7 @@ Request_Parse_Result http_request_parse_adv(Http_Request *req, String_View raw, 
     req->request_id = (String_View){0};
     req->auth_user = (String_View){0};
     req->auth_roles = (String_View){0};
+    req->page_layout = NULL;
     req->client_ip = (String_View){0};
     req->content_length = -1;
     req->body_offset = 0;

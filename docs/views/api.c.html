@@ -135,6 +135,19 @@ the names matter; the comments in each header carry the details.</p>
 <code>void http_access_log_middleware(Http_Request *, Http_Response *, void *, Http_Handler_Fn, void *);</code>
 </span>
 
+<h2>http_stats.h</h2>
+<span class="api">
+<code>void http_stats_init(Http_Stats *s);</code><br>
+<code>void http_stats_record(Http_Stats *s, Http_Request *req, Http_Response *res);</code><br>
+<code>void http_stats_middleware(...);</code> — outermost chain slot that counts every
+finished request into the <code>Http_Stats</code> you pass as <code>user_data</code><br>
+<code>size_t http_stats_write(Http_Stats *s, char *out, size_t out_sz, unsigned long long uptime_ms);</code>
+</span>
+<p>All counters are atomics — requests served, response bytes written
+(post-compression), per-status-class buckets and uptime — so the CLI's
+<code>--stats</code> flag, a <code>--healthz</code> probe and a hand-written
+server all read the same numbers without locking.</p>
+
 <h2>security.h / validate.h</h2>
 <span class="api">
 <code>void http_response_security_headers(Http_Response *res, const char *csp);</code><br>
@@ -272,6 +285,19 @@ answers 401/403 (or 303 redirects to login/forbidden paths) by role<br>
 <code>int tls_self_signed_paths(const char *dir, const char *name, char *cert_out, size_t certsz, char *key_out, size_t keysz, int *created, char *err, size_t errsz);</code><br>
 <code>int tls_cert_file_sha256(const char *cert_path, char *out, size_t outsz);</code><br>
 <code>void *tls_accept_client(void *ctx, int fd); long tls_recv(...); long tls_send_all(...); void tls_close(...);</code>
+</span>
+
+<h2>Generated server extras</h2>
+
+<p><code>cweb build</code> exposes a couple of helpers on every page, declared
+in the generated <code>pages.h</code>:</p>
+<span class="api">
+<code>Cweb_Db *cweb_database(void);</code> — the store opened from the server's
+<code>--db PATH</code>, or NULL when it ran without one (see <a href="/database">database</a>)<br>
+<code>void cweb_layout_use(Http_Request *req, const char *name);</code> — opt the
+current page into <code>views/layout-NAME.c.html</code> instead of the default
+<code>layout.c.html</code>; pass a string literal (the pointer is borrowed), and
+anything unknown falls back to the default shell
 </span>
 
 <h2>Hand-written servers</h2>

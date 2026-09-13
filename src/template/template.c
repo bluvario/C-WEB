@@ -316,6 +316,7 @@ int cweb_template_to_c(String_View source, const char *fn_name,
             "#include \"validate.h\"\n"
             "#include \"csrf.h\"\n"
             "#include \"flash.h\"\n"
+            "#include \"password.h\"\n"
             "#include \"http.h\"\n"
             "#include \"request.h\"\n"
             "#include \"response.h\"\n"

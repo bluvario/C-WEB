@@ -10,7 +10,7 @@ apps, and runs servers with live reload.</p>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr><td><code>cweb build VIEWS OUT [ROOT [STATIC]]</code></td><td>Compile every page under <code>VIEWS</code> into C, emit <code>OUT/main.c</code> and link <code>OUT/server</code>.</td></tr>
   <tr><td><code>cweb serve [--watch] VIEWS [PORT [ROOT [STATIC]]] [FLAGS...]</code></td><td>Build into a scratch dir and run it. With <code>--watch</code>, rebuild and restart on any file change.</td></tr>
-  <tr><td><code>cweb new [--docker] [--systemd] APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial, a stylesheet and a <code>.gitignore</code>. <code>--docker</code> adds a Dockerfile (build context: the cweb checkout root), <code>--systemd</code> a unit for <code>/opt/APP_DIR</code>.</td></tr>
+  <tr><td><code>cweb new [--docker] [--systemd] [--login] APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial, a stylesheet and a <code>.gitignore</code>. <code>--docker</code> adds a Dockerfile (build context: the cweb checkout root), <code>--systemd</code> a unit for <code>/opt/APP_DIR</code>, and <code>--login</code> a session-backed signup/login/logout/dashboard app whose users live in the <code>--db</code> store as PBKDF2 hashes.</td></tr>
   <tr><td><code>cweb version</code></td><td>Print the framework version.</td></tr>
 </table>
 
@@ -28,6 +28,7 @@ inside an app directory next to the checkout.</p>
   <li><code>views/index.c.html</code> → <code>/index</code> and the root <code>/</code>.</li>
   <li><code>views/404.c.html</code> → not a route; it becomes the app's custom not-found page.</li>
   <li><code>views/layout.c.html</code> → the document shell that wraps every page.</li>
+  <li><code>views/layout-NAME.c.html</code> → an alternate shell. A page opts in with <code>&lt;?c cweb_layout_use(req, "NAME"); ?&gt;</code>; anything unknown falls back to the default layout. NAME is the file's route without the leading slash (<code>layout-admin.c.html</code> → <code>"layout-admin"</code>).</li>
   <li><code>views/partials/*.c.html</code> → compiled and declared in <code>pages.h</code> but never routed; pages render them as fragments.</li>
 </ul>
 
@@ -69,7 +70,10 @@ so both paths honor the same options.</p>
   <tr><td><code>--csp-report-only POLICY</code></td><td>A monitoring-only policy alongside the main one.</td></tr>
   <tr><td><code>--log FILE</code></td><td>Append Common Log Format access lines to FILE.</td></tr>
   <tr><td><code>--route-timeout PATH MS</code></td><td>Give one route a per-request timeout (504 instead of 408 on a stall); repeat for more routes.</td></tr>
-  <tr><td><code>--routes</code></td><td>Print the route table and flags, then exit.</td></tr>
+  <tr><td><code>--routes</code></td><td>Print the route table and flags (including <code>healthz</code> and <code>stats</code> lines), then exit.</td></tr>
+  <tr><td><code>--healthz</code></td><td>Answer a plain-text probe (uptime, plus the <code>--stats</code> line when on) at <code>/healthz</code> for a load balancer or container. The path is reserved ahead of any page claiming the same route.</td></tr>
+  <tr><td><code>--health-path PATH</code></td><td>The probe's path instead of <code>/healthz</code>; must be a path like <code>/status</code>.</td></tr>
+  <tr><td><code>--stats</code></td><td>Count requests in shared atomics: requests served, response bytes, per-status-class buckets and uptime. Served by <code>--healthz</code> and printed once at shutdown.</td></tr>
 </table>
 
 <div class="note">

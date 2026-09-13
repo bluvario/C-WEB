@@ -87,6 +87,15 @@ typedef struct {
     // was resolved.
     String_View auth_roles;
 
+    // layout the generated server should wrap this page in, chosen by the
+    // page itself with cweb_layout_use(req, "layout-admin"). the generated
+    // wrapper reads it back and dispatches to the matching layout function,
+    // falling back to the default layout.c.html when NULL or unknown. this
+    // pointer is borrowed, never owned: it must name a static string (a
+    // literal is fine), so http_request_free does not free it, and the parse
+    // resets it to NULL at the start of every request.
+    const char *page_layout;
+
     Http_Header_Array headers;
 
     // filled in by the router when a route carries a timeout override.

@@ -285,11 +285,16 @@ static int is_partial(const char *rel)
     return strncmp(rel, "partials/", 9) == 0;
 }
 
-// views/layout.c.html is the one-page convention: compiled like a page and
-// declared in pages.h, but not routed -- when present it wraps every page
+// views/layout.c.html and views/layout-<name>.c.html are the wrapper
+// conventions: compiled like pages and declared in pages.h, but never routed.
+// the plain layout.c.html wraps every page by default; a layout-N.c.html is
+// an alternate shell any page can opt into with cweb_layout_use(req, "N")
 static int is_layout(const char *rel)
 {
-    return strcmp(rel, "layout.c.html") == 0;
+    size_t n = strlen(rel);
+    return strcmp(rel, "layout.c.html") == 0 ||
+           (n > 7 + 7 && strncmp(rel, "layout-", 7) == 0 &&
+            strcmp(rel + n - 7, ".c.html") == 0);
 }
 
 // string content for a C literal, escaped so a filename cannot smuggle
@@ -359,6 +364,8 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "#include \"request_id.h\"\n"
         "#include \"auth.h\"\n"
         "#include \"env.h\"\n"
+        "#include \"http_stats.h\"\n"
+        "#include \"date.h\"\n"
         "#include \"ip.h\"\n"
         "#include \"client_ip.h\"\n"
         "#include \"log.h\"\n"
@@ -407,6 +414,19 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
          "// KEY=VALUE file loaded by --env-file before the flags are parsed,\n"
          "// so defaults (PORT, CWEB_DB, ...) can be checked in; NULL = none\n"
          "static const char *cweb_env_file_path = NULL;\n"
+         "\n"
+         "// request telemetry from --stats: an Http_Stats counted by the\n"
+         "// outermost middleware, printed at shutdown and from the healthz\n"
+         "// body when --healthz is on (all-zero when --stats is off)\n"
+         "static Http_Stats cweb_stats;\n"
+         "static int cweb_stats_enabled = 0;\n"
+         "\n"
+         "// --healthz answers a plain-text probe (uptime, and the stats line\n"
+         "// when --stats is on) so load balancers and containers can watch\n"
+         "// the app; --health-path moves the endpoint off the default /healthz\n"
+         "static int cweb_healthz_enabled = 0;\n"
+         "static const char *cweb_healthz_path = \"/healthz\";\n"
+         "static unsigned long long cweb_started_ms = 0;\n"
          "\n"
         "// shared secret for HMAC-signed requests, from --signature-secret;\n"
         "// NULL keeps request signing off entirely\n"
@@ -556,6 +576,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     fputs("    if (cweb_env_file_path != NULL) "
           "printf(\"env-file: %s\\n\", cweb_env_file_path);\n",
           f);
+    fputs("    if (cweb_healthz_enabled) "
+          "printf(\"healthz: %s\\n\", cweb_healthz_path);\n",
+          f);
+    fputs("    if (cweb_stats_enabled) "
+          "printf(\"stats: on\\n\");\n",
+          f);
     fputs("    if (cweb_tls_cert != NULL && cweb_tls_key != NULL) "
           "printf(\"tls-cert: %s\\n\", cweb_tls_cert);\n",
           f);
@@ -606,9 +632,42 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
     }
 
     if (has_layout) {
-        // each routed page renders into a capture that views/layout.c.html
-        // then embeds, so pages stay content-only and one file shapes the
-        // whole site; the wrapper forwards what the router hands it
+        // each routed page renders into a capture that a layout page then
+        // embeds, so pages stay content-only and one file shapes the site;
+        // the wrapper forwards what the router hands it. plain layout.c.html
+        // wraps everything by default; a page can opt into another
+        // layout-N.c.html shell with cweb_layout_use(req, "N") (declared in
+        // the generated pages.h so every page's translation unit sees it)
+        fputs(
+            "void cweb_layout_use(Http_Request *req, const char *name)\n"
+            "{\n"
+            "    req->page_layout = name;\n"
+            "}\n\n",
+            f);
+        fputs(
+            "// dispatches to the layout a page asked for, falling back to the\n"
+            "// default layout.c.html when it asked for nothing or unknown\n"
+            "static void cweb_apply_layout(Http_Request *req, Http_Response *res,\n"
+            "                              Str_Map *params, void *user_data)\n"
+            "{\n"
+            "    if (req->page_layout != NULL) {\n", f);
+        for (size_t i = 0; i < views->count; i++) {
+            char name[128], route[512];
+            cweb_template_page_name(views->items[i], name, sizeof name);
+            route_of(views->items[i], route, sizeof route);
+            if (!is_layout(views->items[i]) || strcmp(route, "/layout") == 0) {
+                continue; // default layout is the fallback; never list it
+            }
+            fputs("        if (strcmp(req->page_layout, \"", f);
+            emit_esc(f, route + 1);
+            fputs("\") == 0) {\n", f);
+            fprintf(f, "            %s(req, res, params, user_data);\n", name);
+            fputs("            return;\n        }\n", f);
+        }
+        fputs("    }\n"
+              "    page_layout(req, res, params, user_data);\n"
+              "}\n\n",
+              f);
         for (size_t i = 0; i < views->count; i++) {
             char name[128], route[512];
             cweb_template_page_name(views->items[i], name, sizeof name);
@@ -638,7 +697,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
                   "        return;\n"
                   "    }\n"
                   "    res->body.count = 0;\n"
-                  "    page_layout(req, res, params, user_data);\n"
+                  "    cweb_apply_layout(req, res, params, user_data);\n"
                   "}\n\n", f);
         }
         if (has_404) {
@@ -658,11 +717,35 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
                 "        return;\n"
                 "    }\n"
                 "    res->body.count = 0;\n"
-                "    page_layout(req, res, params, user_data);\n"
+                "    cweb_apply_layout(req, res, params, user_data);\n"
                 "}\n\n",
                 f);
         }
     }
+
+    fputs(
+        "// the probe behind --healthz. claims the --health-path (default\n"
+        "// /healthz) ahead of any page, so a container or load balancer can\n"
+        "// always reach it; never cached, never redirected, plain-text only\n"
+        "static void cweb_healthz_handler(Http_Request *req, Http_Response *res,\n"
+        "                                 Str_Map *params, void *user_data)\n"
+        "{\n"
+        "    (void)req; (void)params; (void)user_data;\n"
+        "    http_response_set_status(res, HTTP_200_OK);\n"
+        "    http_response_set_header(res, \"Content-Type\",\n"
+        "                             \"text/plain; charset=utf-8\");\n"
+        "    http_response_set_header(res, \"Cache-Control\", \"no-store\");\n"
+        "    char buf[512];\n"
+        "    if (cweb_stats_enabled) {\n"
+        "        http_stats_write(&cweb_stats, buf, sizeof buf,\n"
+        "                         time_mono_ms() - cweb_started_ms);\n"
+        "    } else {\n"
+        "        snprintf(buf, sizeof buf, \"ok; uptime %llus\\n\",\n"
+        "                 (time_mono_ms() - cweb_started_ms) / 1000);\n"
+        "    }\n"
+        "    http_response_add_body_cstr(res, buf);\n"
+        "}\n\n",
+        f);
 
     fputs(
         "int main(int argc, char **argv)\n"
@@ -691,6 +774,7 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    int rate_per_min = 0;\n"
         "    int secure = 0;\n"
         "    int gzip = 0;\n"
+        "    int stats = 0;\n"
         "    const char *log_path = NULL;\n"
         "    for (int i = 1; i < argc; i++) {\n"
         "        if (strcmp(argv[i], \"--port\") == 0 && i + 1 < argc) {\n"
@@ -804,6 +888,20 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "        } else if (strcmp(argv[i], \"--env-file\") == 0) {\n"
         "            // already loaded up front; here it just skips its value\n"
         "            i++;\n"
+        "        } else if (strcmp(argv[i], \"--healthz\") == 0) {\n"
+        "            // probe endpoint claimed at the default /healthz, ahead\n"
+        "            // of any page that would else answer that path\n"
+        "            cweb_healthz_enabled = 1;\n"
+        "        } else if (strcmp(argv[i], \"--health-path\") == 0 && i + 1 < argc) {\n"
+        "            cweb_healthz_path = argv[++i];\n"
+        "            if (cweb_healthz_path[0] != '/' || cweb_healthz_path[1] == '\\0') {\n"
+        "                fprintf(stderr, \"cweb: --health-path must be a path like /status\\n\");\n"
+        "                return 2;\n"
+        "            }\n"
+        "            cweb_healthz_enabled = 1;\n"
+        "        } else if (strcmp(argv[i], \"--stats\") == 0) {\n"
+        "            stats = 1;\n"
+        "            cweb_stats_enabled = 1;\n"
         "        } else {\n"
         "            fprintf(stderr, \"cweb: unknown option %s\\n\", argv[i]);\n"
         "            return 2;\n"
@@ -822,6 +920,12 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    }\n"
         "    Http_Router r;\n"
         "    router_init(&r);\n"
+        "    // the health probe claims its path ahead of every page, so a\n"
+        "    // container or load balancer keeps a fixed target to poll\n"
+        "    if (cweb_healthz_enabled) {\n"
+        "        router_add(&r, HTTP_GET, cweb_healthz_path,\n"
+        "                   cweb_healthz_handler, NULL);\n"
+        "    }\n"
         "    http_session_store_init(&cweb_sessions, 3600);\n"
         "    // with --db the session store persists to it, so logins survive\n"
         "    // a restart as long as the same database file is passed again\n"
@@ -981,7 +1085,7 @@ fputs(
         "                         cweb_signature_secret != NULL ||\n"
         "                         cweb_basic_auth != NULL ||\n"
         "                         cweb_cors_origin != NULL ||\n"
-        "                         cweb_etag || cweb_request_id ||\n"
+        "                         stats || cweb_etag || cweb_request_id ||\n"
         "                         cweb_csp != NULL || cweb_csp_report_only != NULL;\n"
         "    void *cweb_chain_data = NULL;\n"
         "    if (cweb_middleware) {\n"
@@ -1017,6 +1121,15 @@ fputs(
         "        }\n"
         "        Http_Middleware_Chain chain;\n"
         "        http_middleware_init(&chain);\n"
+        "        if (stats) {\n"
+        "            // --stats counts every request into shared atomics from\n"
+        "            // the outermost slot, so the totals reflect the final\n"
+        "            // response (gzip-compressed bodies, rejections and all);\n"
+        "            // the healthz endpoint and the shutdown banner read them\n"
+        "            http_stats_init(&cweb_stats);\n"
+        "            http_middleware_add(&chain, http_stats_middleware,\n"
+        "                                &cweb_stats);\n"
+        "        }\n"
         "        static Http_ClientIp_Options ip_opts = {0};\n"
         "        if (cweb_trusted_count > 0) {\n"
         "            ip_opts.trusted = cweb_trusted;\n"
@@ -1091,6 +1204,7 @@ fputs(
         "        cweb_user = &r;\n"
         "    }\n"
         "\n"
+        "    cweb_started_ms = time_mono_ms();\n"
         "    int rc;\n"
         "    if (unix_listener >= 0) {\n"
         "        // the unix listener accepts in its own thread while the main\n"
@@ -1114,6 +1228,13 @@ fputs(
         "        net_unix_unlink(cweb_socket_path);\n"
         "    } else {\n"
         "        rc = http_serve_config(listener, cweb_dispatch, cweb_user, &cfg);\n"
+        "    }\n"
+        "    if (cweb_stats_enabled) {\n"
+        "        char stats_buf[512];\n"
+        "        http_stats_write(&cweb_stats, stats_buf, sizeof stats_buf,\n"
+        "                         time_mono_ms() - cweb_started_ms);\n"
+        "        fprintf(stdout, \"cweb: %s\", stats_buf);\n"
+        "        fflush(stdout);\n"
         "    }\n"
         "    if (cweb_middleware) {\n"
         "        http_middleware_data_free(cweb_chain_data);\n"
@@ -1321,6 +1442,14 @@ static int cmd_build(int argc, char **argv)
         " * <?c Cweb_Db *db = cweb_database(); ?> reads and writes persist\n"
         " * between requests. check for NULL before touching it. */\n"
         "Cweb_Db *cweb_database(void);\n"
+        "\n"
+        "/* opt a page into a non-default shell: dynamically generated pages\n"
+        " * (JSON, redirects) when a layout exists, or to switch to another\n"
+        " * views/layout-N.c.html for one page: <?c cweb_layout_use(req, \"N\");\n"
+        " * ?>. the name is the layout file's route without the leading slash;\n"
+        " * anything unknown (or NULL) falls back to layout.c.html. the pointer\n"
+        " * is borrowed - pass a string literal, not a buffer. */\n"
+        "void cweb_layout_use(Http_Request *req, const char *name);\n"
         "#endif\n",
         f);
     fclose(f);
@@ -1407,15 +1536,317 @@ static int dir_has_entries(const char *path)
     return has;
 }
 
+// the --login scaffold: a signup/login/logout/dashboard app whose users live
+// in the --db store as salted PBKDF2 hashes under "user:<name>", with an
+// hour-long session cookie (cweb_session) as the auth token. broken pieces
+// (no --db, no session) degrade to a redirect or an inline hint instead of a
+// crash, so the app is explorable as soon as it builds.
+static int write_login_scaffold(const char *app_dir)
+{
+    char app[4096];
+
+    path_join(app, sizeof app, app_dir, "views/layout.c.html");
+    if (write_file(app,
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\">\n"
+        "<head>\n"
+        "  <meta charset=\"utf-8\">\n"
+        "  <title>cweb app</title>\n"
+        "  <link rel=\"stylesheet\" href=\"/style.css\">\n"
+        "</head>\n"
+        "<body>\n"
+        "  <nav>\n"
+        "    <a href=\"/\">Home</a>\n"
+        "    <?c\n"
+        "      Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "      Http_Session *nav_sesh = http_session_from_cookie(\n"
+        "          sessions, req, \"cweb_session\");\n"
+        "      if (nav_sesh != NULL && http_session_value(nav_sesh, \"username\") != NULL) {\n"
+        "    ?>\n"
+        "      <a href=\"/dashboard\">Dashboard</a>\n"
+        "      <form method=\"post\" action=\"/logout\" class=\"nav-form\">\n"
+        "        <?c http_csrf_field(res, nav_sesh); ?>\n"
+        "        <button type=\"submit\">Log out</button>\n"
+        "      </form>\n"
+        "    <?c } else { ?>\n"
+        "      <a href=\"/login\">Log in</a>\n"
+        "      <a href=\"/signup\">Sign up</a>\n"
+        "    <?c } ?>\n"
+        "  </nav>\n"
+        "  <main>\n"
+        "    <?c cweb_tpl_layout_emit(res); ?>\n"
+        "  </main>\n"
+        "  <?c page_footer(req, res, params, user_data); ?>\n"
+        "</body>\n"
+        "</html>\n") != 0) {
+        return die("cannot write views/layout.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "views/index.c.html");
+    if (write_file(app,
+        "<?c\n"
+        "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "  Http_Session *sesh = http_session_from_cookie(\n"
+        "      sessions, req, \"cweb_session\");\n"
+        "  const char *who = sesh ? http_session_value(sesh, \"username\") : NULL;\n"
+        "?>\n"
+        "<h1>cweb app</h1>\n"
+        "<?c if (who != NULL) { ?>\n"
+        "  <p>Welcome back, <strong><?h= sv_from_cstr(who) ?></strong>.</p>\n"
+        "  <p><a href=\"/dashboard\">Go to your dashboard</a></p>\n"
+        "<?c } else { ?>\n"
+        "  <p>A little app with accounts, sessions and a private dashboard,\n"
+        "     generated by <code>cweb new --login</code>.\n"
+        "  <p><a class=\"btn\" href=\"/signup\">Create an account</a>\n"
+        "     <a class=\"btn\" href=\"/login\">Log in</a></p>\n"
+        "<?c } ?>\n") != 0) {
+        return die("cannot write views/index.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "views/login.c.html");
+    if (write_file(app,
+        "<?c\n"
+        "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "  const char *error = NULL;\n"
+        "  if (req->method == HTTP_POST) {\n"
+        "      const char *username = strmap_get_cstr(params, \"username\");\n"
+        "      const char *password = strmap_get_cstr(params, \"password\");\n"
+        "      Cweb_Db *db = cweb_database();\n"
+        "      if (db == NULL) {\n"
+        "          error = \"no database: run the server with --db app.db\";\n"
+        "      } else if (username != NULL && password != NULL) {\n"
+        "          char key[512];\n"
+        "          snprintf(key, sizeof key, \"user:%s\", username);\n"
+        "          String_View stored = cweb_db_get(db, sv_from_cstr(key));\n"
+        "          if (stored.count > 0) {\n"
+        "              char hash[512];\n"
+        "              memcpy(hash, stored.data, stored.count < sizeof hash - 1\n"
+        "                     ? stored.count : sizeof hash - 1);\n"
+        "              hash[stored.count < sizeof hash - 1 ? stored.count\n"
+        "                                                   : sizeof hash - 1] = '\\0';\n"
+        "              if (cweb_password_verify(password, hash) == 1) {\n"
+        "                  char *token = http_session_create(sessions, 3600);\n"
+        "                  Http_Session *sesh = http_session_open(sessions, token);\n"
+        "                  http_session_set(sesh, \"username\", username);\n"
+        "                  http_csrf_rotate(sesh); // never keep a pre-login token\n"
+        "                  http_session_issue_cookie(res, \"cweb_session\", token, NULL);\n"
+        "                  http_response_redirect(res, HTTP_303_SEE_OTHER, \"/dashboard\");\n"
+        "                  return;\n"
+        "              }\n"
+        "          }\n"
+        "          error = \"username or password is wrong\";\n"
+        "      }\n"
+        "  }\n"
+        "?>\n"
+        "<h1>Log in</h1>\n"
+        "<?c if (error) { ?>\n"
+        "  <p class=\"err\"><?h= sv_from_cstr(error) ?></p>\n"
+        "<?c } ?>\n"
+        "<form method=\"post\" action=\"/login\">\n"
+        "  <label>Username <input type=\"text\" name=\"username\" autofocus></label>\n"
+        "  <label>Password <input type=\"password\" name=\"password\"></label>\n"
+        "  <button type=\"submit\">Log in</button>\n"
+        "</form>\n"
+        "<p>No account yet? <a href=\"/signup\">Sign up</a></p>\n") != 0) {
+        return die("cannot write views/login.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "views/signup.c.html");
+    if (write_file(app,
+        "<?c\n"
+        "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "  const char *error = NULL;\n"
+        "  if (req->method == HTTP_POST) {\n"
+        "      const char *username = strmap_get_cstr(params, \"username\");\n"
+        "      const char *password = strmap_get_cstr(params, \"password\");\n"
+        "      Cweb_Db *db = cweb_database();\n"
+        "      if (db == NULL) {\n"
+        "          error = \"no database: run the server with --db app.db\";\n"
+        "      } else if (username == NULL || password == NULL ||\n"
+        "                 username[0] == '\\0' || strlen(password) < 8) {\n"
+        "          error = \"password must be at least 8 characters\";\n"
+        "      } else {\n"
+        "          char key[512];\n"
+        "          snprintf(key, sizeof key, \"user:%s\", username);\n"
+        "          if (cweb_db_get(db, sv_from_cstr(key)).count > 0) {\n"
+        "              error = \"that username is taken\";\n"
+        "          } else {\n"
+        "              char hash[CWEB_PASSWORD_HASH_MAX];\n"
+        "              if (cweb_password_hash(password, 0, hash, sizeof hash) != 0) {\n"
+        "                  error = \"could not hash the password (try again)\";\n"
+        "              } else if (cweb_db_put(db, sv_from_cstr(key),\n"
+        "                                     sv_from_cstr(hash)) != 0) {\n"
+        "                  error = \"could not save the account (try again)\";\n"
+        "              } else {\n"
+        "                  cweb_db_sync(db);\n"
+        "                  char *token = http_session_create(sessions, 3600);\n"
+        "                  Http_Session *sesh = http_session_open(sessions, token);\n"
+        "                  http_session_set(sesh, \"username\", username);\n"
+        "                  http_csrf_rotate(sesh);\n"
+        "                  http_session_issue_cookie(res, \"cweb_session\", token, NULL);\n"
+        "                  http_response_redirect(res, HTTP_303_SEE_OTHER, \"/dashboard\");\n"
+        "                  return;\n"
+        "              }\n"
+        "          }\n"
+        "      }\n"
+        "  }\n"
+        "?>\n"
+        "<h1>Create an account</h1>\n"
+        "<?c if (error) { ?>\n"
+        "  <p class=\"err\"><?h= sv_from_cstr(error) ?></p>\n"
+        "<?c } ?>\n"
+        "<form method=\"post\" action=\"/signup\">\n"
+        "  <label>Username <input type=\"text\" name=\"username\" autofocus></label>\n"
+        "  <label>Password <input type=\"password\" name=\"password\"\n"
+        "                        title=\"at least 8 characters\"></label>\n"
+        "  <button type=\"submit\">Create account</button>\n"
+        "</form>\n"
+        "<p>Already have an account? <a href=\"/login\">Log in</a></p>\n") != 0) {
+        return die("cannot write views/signup.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "views/logout.c.html");
+    if (write_file(app,
+        "<?c\n"
+        "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "  const String_View *cookie = http_request_get_header(req, \"Cookie\");\n"
+        "  Str_Map jar;\n"
+        "  strmap_init(&jar);\n"
+        "  if (cookie != NULL) {\n"
+        "      http_cookie_parse(&jar, *cookie);\n"
+        "  }\n"
+        "  const char *raw = strmap_get_cstr(&jar, \"cweb_session\");\n"
+        "  char token[512];\n"
+        "  token[0] = '\\0';\n"
+        "  if (raw != NULL) {\n"
+        "      snprintf(token, sizeof token, \"%s\", raw);\n"
+        "  }\n"
+        "  strmap_free(&jar); // raw pointed into the jar; token is a copy\n"
+        "  if (token[0] == '\\0') {\n"
+        "      http_response_redirect(res, HTTP_303_SEE_OTHER, \"/\");\n"
+        "      return;\n"
+        "  }\n"
+        "  Http_Session *sesh = http_session_open(sessions, token);\n"
+        "  if (req->method == HTTP_POST) {\n"
+        "      if (http_csrf_verify(params, sesh) != 0) {\n"
+        "          http_csrf_reject(res, \"/\");\n"
+        "          return;\n"
+        "      }\n"
+        "      http_session_destroy(sessions, token);\n"
+        "      http_session_issue_cookie(res, \"cweb_session\", \"\", NULL);\n"
+        "      http_response_redirect(res, HTTP_303_SEE_OTHER, \"/\");\n"
+        "      return;\n"
+        "  }\n"
+        "  http_response_redirect(res, HTTP_303_SEE_OTHER, \"/dashboard\");\n"
+        "?>\n") != 0) {
+        return die("cannot write views/logout.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "views/dashboard.c.html");
+    if (write_file(app,
+        "<?c\n"
+        "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
+        "  Http_Session *sesh = http_session_from_cookie(\n"
+        "      sessions, req, \"cweb_session\");\n"
+        "  const char *who = sesh != NULL ? http_session_value(sesh, \"username\") : NULL;\n"
+        "  if (who == NULL) {\n"
+        "      http_response_redirect(res, HTTP_303_SEE_OTHER, \"/login\");\n"
+        "      return;\n"
+        "  }\n"
+        "?>\n"
+        "<h1>Dashboard</h1>\n"
+        "<p>Signed in as <strong><?h= sv_from_cstr(who) ?></strong>.</p>\n"
+        "<p>This page is private: anyone not holding a session cookie is\n"
+        "   redirected to /login before a byte renders.</p>\n"
+        "<form method=\"post\" action=\"/logout\">\n"
+        "  <?c http_csrf_field(res, sesh); ?>\n"
+        "  <button type=\"submit\">Log out</button>\n"
+        "</form>\n") != 0) {
+        return die("cannot write views/dashboard.c.html");
+    }
+
+    path_join(app, sizeof app, app_dir, "static/style.css");
+    if (write_file(app,
+        "body {\n"
+        "  font-family: system-ui, sans-serif;\n"
+        "  max-width: 36rem;\n"
+        "  margin: 3rem auto;\n"
+        "  padding: 0 1rem;\n"
+        "  color: #222;\n"
+        "}\n"
+        "\n"
+        "h1 {\n"
+        "  border-bottom: 2px solid #bcd;\n"
+        "  padding-bottom: .4rem;\n"
+        "}\n"
+        "\n"
+        "nav {\n"
+        "  display: flex;\n"
+        "  gap: 1rem;\n"
+        "  align-items: center;\n"
+        "  margin-bottom: 1.5rem;\n"
+        "}\n"
+        "\n"
+        "nav a, .btn {\n"
+        "  color: #147;\n"
+        "  text-decoration: none;\n"
+        "}\n"
+        "\n"
+        ".nav-form {\n"
+        "  display: inline;\n"
+        "  margin: 0;\n"
+        "}\n"
+        "\n"
+        "form {\n"
+        "  display: grid;\n"
+        "  gap: .6rem;\n"
+        "  max-width: 22rem;\n"
+        "}\n"
+        "\n"
+        "label {\n"
+        "  display: grid;\n"
+        "  gap: .2rem;\n"
+        "}\n"
+        "\n"
+        "input {\n"
+        "  padding: .3rem .4rem;\n"
+        "  font: inherit;\n"
+        "}\n"
+        "\n"
+        "button {\n"
+        "  font: inherit;\n"
+        "  padding: .3rem .8rem;\n"
+        "  max-width: max-content;\n"
+        "}\n"
+        "\n"
+        ".err {\n"
+        "  color: #b00;\n"
+        "}\n"
+        "\n"
+        "code, footer {\n"
+        "  color: #556;\n"
+        "}\n"
+        "\n"
+        "footer {\n"
+        "  margin-top: 2rem;\n"
+        "}\n") != 0) {
+        return die("cannot write static/style.css");
+    }
+
+    return 0;
+}
+
 static int cmd_new(int argc, char **argv)
 {
     const char *app_dir = NULL;
-    int docker = 0, systemd = 0;
+    int docker = 0, systemd = 0, login = 0;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--docker") == 0) {
             docker = 1;
         } else if (strcmp(argv[i], "--systemd") == 0) {
             systemd = 1;
+        } else if (strcmp(argv[i], "--login") == 0) {
+            login = 1;
         } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
             char msg[512];
             snprintf(msg, sizeof msg, "new: unknown option %s", argv[i]);
@@ -1427,7 +1858,8 @@ static int cmd_new(int argc, char **argv)
         }
     }
     if (app_dir == NULL) {
-        return die("new needs an app dir (cweb new [--docker] [--systemd] APP_DIR)");
+        return die("new needs an app dir "
+                   "(cweb new [--docker] [--systemd] [--login] APP_DIR)");
     }
     // refuse only when a non-empty dir occupies the spot; an empty dir is fine
     struct stat st;
@@ -1512,6 +1944,14 @@ static int cmd_new(int argc, char **argv)
         return die("cannot write .gitignore");
     }
 
+    if (login) {
+        // a session-backed account scaffold: users live under user:<name> in
+        // the --db store as salted PBKDF2 hashes, and a session cookie
+        // (cweb_session) signs a user in for an hour. serve with --db so the
+        // store exists, or every page prints a hint instead of failing.
+        write_login_scaffold(app_dir);
+    }
+
     if (docker) {
         // build context must be the cweb checkout root (the dir holding the
         // Makefile and include/); the app itself lives under ./APP_DIR
@@ -1573,6 +2013,12 @@ static int cmd_new(int argc, char **argv)
            "  static/style.css       served from the /* mount\n"
            "  .gitignore             keeps build/, out/, *.db and .env out\n",
            app_dir);
+    if (login) {
+        printf("  views/signup.c.html   create an account (stores a PBKDF2 hash)\n"
+               "  views/login.c.html    sign in with a session cookie\n"
+               "  views/logout.c.html   guarded POST; checks the CSRF token\n"
+               "  views/dashboard.c.html private page, redirects to /login\n");
+    }
     if (docker) {
         printf("  Dockerfile             build context: the cweb checkout root\n");
     }
@@ -1580,9 +2026,14 @@ static int cmd_new(int argc, char **argv)
         printf("  cweb.service           systemd unit (/opt/%s, /etc/%s.env)\n",
                app_dir, app_dir);
     }
-    printf("\n"
-           "next: cd %s && cweb serve views 8080 . static\n",
-           app_dir);
+    printf("\n");
+    if (login) {
+        printf("next: cd %s && cweb serve views 8080 . static --db app.db\n"
+               "     (the account pages need --db so the user store has a home)\n",
+               app_dir);
+    } else {
+        printf("next: cd %s && cweb serve views 8080 . static\n", app_dir);
+    }
     return 0;
 }
 
@@ -1809,10 +2260,12 @@ static void usage(FILE *f)
         "      build into a scratch dir and run it; --watch rebuilds and\n"
         "      restarts on change; FLAGS pass through to the server\n"
         "      (e.g. --rate 30 --secure --log access.log)\n"
-        "  new [--docker] [--systemd] APP_DIR\n"
-        "      scaffold a runnable app skeleton: views, static/, a .gitignore\n"
-        "      (build/, out/, *.db, .env); --docker also writes a Dockerfile,\n"
-        "      --systemd a cweb.service unit for running it on a VPS\n"
+"  new [--docker] [--systemd] [--login] APP_DIR\n"
+         "      scaffold an app dir with views, partials, static/style.css, and a\n"
+         "      .gitignore (build/, out/, *.db, .env); --login adds signup, login,\n"
+         "      logout and a protected dashboard wired to sessions; --docker also\n"
+         "      writes a Dockerfile, --systemd a cweb.service unit for running it\n"
+         "      on a VPS\n"
         "  version | --version             print the framework version\n"
         "  help | --help | -h              print this help\n"
         "\n"
@@ -1896,10 +2349,21 @@ static void usage(FILE *f)
         "                                  the default 408; repeat for more routes\n"
 "  --routes                         list the routes and the hardening knobs\n"
          "                                  in effect, then exit without binding\n"
-         "  --env-file FILE                  load KEY=VALUE defaults before the flags\n"
+"  --env-file FILE                  load KEY=VALUE defaults before the flags\n"
          "                                  below are read; PORT defaults the port,\n"
          "                                  CWEB_DB the --db path (existing env wins)\n"
-        "\n"
+         "  --healthz                       answer a plain-text probe (uptime, plus\n"
+         "                                  the --stats line when on) at the default\n"
+         "                                  /healthz for a load balancer or container;\n"
+         "                                  the path is reserved ahead of any page\n"
+         "                                  claiming the same route\n"
+         "  --health-path PATH              the probe's path instead of /healthz\n"
+         "                                  (must be a path like /status)\n"
+         "  --stats                         count requests in shared atomics: bytes\n"
+         "                                  written, per-status-class buckets, and\n"
+         "                                  uptime; printed at shutdown and served\n"
+         "                                  by --healthz\n"
+         "\n"
         "Run the self-hosting docs site for the full manual: in the checkout,\n"
         "  cweb build docs/views build/docs . docs/static\n"
         "  ./build/docs/server --port 8080\n");

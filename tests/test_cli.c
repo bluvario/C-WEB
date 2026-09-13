@@ -355,7 +355,7 @@ int main(void)
     if (f == NULL) {
         return 1;
     }
-    size_t cap = 32768, n = 0;
+    size_t cap = 65536, n = 0;
     char *main = malloc(cap);
     n = fread(main, 1, cap - 1, f);
     main[n] = '\0';
