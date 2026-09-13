@@ -15,18 +15,23 @@
 // refusing new ones with RST_STREAM(REFUSED_STREAM)
 #define H2_MAX_CONCURRENT_STREAMS 100u
 
-// serves an HTTP/2 cleartext (h2c) connection on fd. two entry paths:
-//  - prior knowledge: rb already holds the client preface and any frames that
+// serves an HTTP/2 connection on fd. two transports:
+//  - cleartext h2c: ssl must be NULL and the connection begins with the
+//    client preface. rb already holds the preface and any frames that
 //    arrived with it; consumed must be H2_MAGIC_LEN (the preface itself), and
-//    upgrade_req is NULL.
-//  - upgrade: the HTTP/1.1 request was parsed out of rb by the caller;
-//    consumed is how many bytes of rb that request occupied, and upgrade_req
-//    is that parsed request, served as stream 1. the caller must keep its rb
-//    and upgrade_req alive until h2_serve returns and frees them itself.
+//    upgrade_req is NULL. when the connection instead arrived as an HTTP/1.1
+//    request announcing an h2c upgrade, consumed is how many bytes of rb that
+//    request occupied, and upgrade_req is that parsed request, served as
+//    stream 1. the caller must keep its rb and upgrade_req alive until
+//    h2_serve returns and frees them itself.
+//  - over TLS: ssl is the OpenSSL session (tls.h) and ALPN negotiated "h2",
+//    so the 24-octet client preface is omitted (RFC 7540 section 3.5). rb
+//    must be NULL, consumed 0 and upgrade_req NULL; the client's first frame
+//    is its SETTINGS. every read and write crosses the encrypted session.
 // the caller owns the socket and closes it after this returns.
-void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data,
-              const Http_Server_Config *cfg, Read_Buffer *rb, size_t consumed,
-              Http_Request *upgrade_req, String_View remote,
+void h2_serve(Socket_Handle fd, void *ssl, Http_Handler_Fn handler,
+              void *user_data, const Http_Server_Config *cfg, Read_Buffer *rb,
+              size_t consumed, Http_Request *upgrade_req, String_View remote,
               unsigned long default_timeout_ms);
 
 // true when req is an HTTP/1.1 request announcing an h2c upgrade

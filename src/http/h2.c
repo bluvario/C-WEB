@@ -17,6 +17,7 @@
 #include "response.h"
 #include "strbuf.h"
 #include "sv.h"
+#include "tls.h"
 #include "xmem.h"
 
 #define H2_INITIAL_WINDOW 65535u
@@ -100,6 +101,7 @@ typedef struct {
 
 typedef struct {
     Socket_Handle fd;
+    void *ssl;  // OpenSSL session (tls.h) when this is HTTP/2 over TLS
     Http_Handler_Fn handler;
     void *user_data;
     const Http_Server_Config *cfg;
@@ -243,7 +245,9 @@ static bool name_valid(String_View name)
 
 static int h2_write(const H2_Conn *c, const void *buf, size_t len)
 {
-    return net_send_all(c->fd, buf, len) == (long)len ? 0 : -1;
+    long n = c->ssl != NULL ? tls_send_all(c->ssl, buf, len)
+                            : net_send_all(c->fd, buf, len);
+    return n == (long)len ? 0 : -1;
 }
 
 static void h2_conn_error(H2_Conn *c, uint32_t err);
@@ -377,9 +381,10 @@ static int h2_fill(H2_Conn *c)
     if (w.count == 0) {
         return -1;
     }
-    long n = net_recv(c->fd, (void *)w.data, w.count);
+    long n = c->ssl != NULL ? tls_recv(c->ssl, (void *)w.data, w.count)
+                            : net_recv(c->fd, (void *)w.data, w.count);
     if (n == NET_READ_TIMEOUT) {
-        log_warn("h2c client stalled, dropping connection");
+        log_warn("HTTP/2 client idle, dropping connection");
         return -1;
     }
     if (n <= 0) {
@@ -1690,14 +1695,15 @@ static long h2_b64url_decode(const char *s, size_t n, uint8_t *out,
     return (long)out_n;
 }
 
-void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data,
-              const Http_Server_Config *cfg, Read_Buffer *rb, size_t consumed,
-              Http_Request *upgrade_req, String_View remote,
+void h2_serve(Socket_Handle fd, void *ssl, Http_Handler_Fn handler,
+              void *user_data, const Http_Server_Config *cfg, Read_Buffer *rb,
+              size_t consumed, Http_Request *upgrade_req, String_View remote,
               unsigned long default_timeout_ms)
 {
     H2_Conn c;
     memset(&c, 0, sizeof c);
     c.fd = fd;
+    c.ssl = ssl;
     c.handler = handler;
     c.user_data = user_data;
     c.cfg = cfg;
@@ -1724,8 +1730,7 @@ void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data,
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Connection: Upgrade\r\n"
             "Upgrade: h2c\r\n\r\n";
-        if (net_send_all(fd, upgrade101, sizeof upgrade101 - 1) !=
-            (long)(sizeof upgrade101 - 1)) {
+        if (h2_write(&c, upgrade101, sizeof upgrade101 - 1) != 0) {
             goto out;
         }
         const String_View *hs =
@@ -1739,7 +1744,7 @@ void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data,
                 static const char bad400[] =
                     "HTTP/1.1 400 Bad Request\r\n"
                     "Content-Length: 0\r\nConnection: close\r\n\r\n";
-                net_send_all(fd, bad400, sizeof bad400 - 1);
+                h2_write(&c, bad400, sizeof bad400 - 1);
                 goto out;
             }
             h2_apply_settings(&c, payload, (uint32_t)dl);
@@ -1757,6 +1762,17 @@ void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data,
     }
 
     for (;;) {
+        // over TLS, ALPN already identifies the stream as h2, yet nghttp2
+        // clients (curl) still emit the 24-octet "PRI * HTTP/2.0" preface
+        // before their first SETTINGS (RFC 7540 section 3.5 scopes the
+        // preface to h2c, but several clients send it unconditionally). skip
+        // it so frame modulo-parsing sees SETTINGS as the first frame. the
+        // h2c paths handed this buffer over with the preface already eaten,
+        // so the match can only fire on the TLS path.
+        if (c.rb.count >= H2_MAGIC_LEN &&
+            memcmp(c.rb.data, H2_MAGIC, H2_MAGIC_LEN) == 0) {
+            rb_discard(&c.rb, H2_MAGIC_LEN);
+        }
         h2_dispatch_ready(&c);
         h2_pump(&c);
         h2_sweep(&c);

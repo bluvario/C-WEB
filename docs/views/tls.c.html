@@ -58,8 +58,19 @@ is the recommended production shape.</p>
 <h2>HTTP/2 over TLS</h2>
 
 <p>With OpenSSL serving HTTPS, HTTP/2 is negotiated via ALPN transparently.
-Modern browsers speak h2 to the TLS port automatically; the h2c path is what
-cleartext clients use. See <a href="/http2">HTTP/2</a>.</p>
+The server advertises <code>h2</code> alongside <code>http/1.1</code>, so a
+client that negotiates h2 goes straight onto the multiplexed framing — no
+upgrade round-trip, on the same port and certificate as plain 1.1. Modern
+browsers speak h2 to the TLS port automatically; the h2c path is what
+cleartext clients use.</p>
+
+<pre><code>curl --http2 -k https://localhost:8443/
+# HTTP/2.0 200</code></pre>
+
+<p>nghttp2-based clients (curl 8.22 and up, browsers) send the 24-byte h2c
+connection preface immediately after the TLS handshake; the server recognizes
+and discards the redundant magic bytes, so both stack-only and
+stack-inclusive h2 clients interoperate. See <a href="/http2">HTTP/2</a>.</p>
 
 <h2>Inside the server</h2>
 

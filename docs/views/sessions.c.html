@@ -144,6 +144,13 @@ a POST guarded by a CSRF token; the login page rotates its token the moment
 auth succeeds; the dashboard redirects anonymous callers to <code>/login</code> —
 the api.c.html tour right here, running.</p>
 
+<p>Brute-forcing is throttled from the first request: every generated app
+gains a <code>cweb_login_throttle</code> guard (rate 1/s, a burst of 3, keyed
+per claimed username on the login form and per caller address on signup). A
+guessing session stops burning PBKDF2 time the moment its budget runs out —
+the server answers 429 with a <code>Retry-After</code>, not a fresh hash — and
+a burst of account creation from one address is capped the same way.</p>
+
 <h2>Next</h2>
 
 <ul>

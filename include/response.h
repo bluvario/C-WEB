@@ -2,6 +2,7 @@
 #define CWEB_RESPONSE_H
 
 #include <stdbool.h>
+#include <time.h>
 
 #include "http.h"
 #include "json.h"
@@ -78,6 +79,12 @@ void http_response_append_header(Http_Response *res, const char *name, const cha
 // value; the new line lands at the end. equivalent to
 // http_response_set_header; kept for source compatibility.
 void http_response_set_header_replace(Http_Response *res, const char *name, const char *value);
+
+// stamps a Last-Modified header (RFC 7231 IMF-fixdate) so the etag
+// middleware can validate repeats with If-Modified-Since. dynamic handlers
+// usually stamp the moment their content last changed; the middleware turns
+// an unmodified follow-up into a 304 (no body, no Content-Length).
+void http_response_set_last_modified(Http_Response *res, time_t modified);
 
 // scans the response's header text for name (any case) and returns a heap
 // copy of its value, or NULL when the header is absent. caller xfrees it.

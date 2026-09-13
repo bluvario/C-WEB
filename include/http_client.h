@@ -59,12 +59,22 @@ int http_client_req_get(Http_Client *c, const char *url_or_path, Http_Client_Res
 int http_client_req_post(Http_Client *c, const char *url_or_path, String_View body,
                          Http_Client_Result *out);
 
+// POSTs a whole file from disk on the persistent connection: reads file_path
+// (capped at the client's 32 MiB body limit), sends its bytes as-is with a
+// computed Content-Length. the file data is buffered just for the exchange and
+// freed before the function returns. -1 with error set when the file cannot
+// be read or is too large for one request.
+int http_client_req_post_file(Http_Client *c, const char *url_or_path,
+                              const char *file_path, Http_Client_Result *out);
+
 // one-shot calls: issue a single request and close the connection again
 int http_client_request(const char *url, Http_Method method,
                         const char *extra_headers, String_View body,
                         Http_Client_Result *out);
 int http_client_get(const char *url, Http_Client_Result *out);
 int http_client_post(const char *url, String_View body, Http_Client_Result *out);
+// one-shot upload: POSTs file_path to url on a fresh connection
+int http_client_post_file(const char *url, const char *file_path, Http_Client_Result *out);
 
 void http_client_result_free(Http_Client_Result *out);
 

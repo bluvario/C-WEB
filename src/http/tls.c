@@ -72,6 +72,35 @@ void *tls_server_ctx_new(const char *cert, const char *key,
     return ctx;
 }
 
+// the ALPN offer: "h2" first, then "http/1.1", both in the length-prefixed
+// wire layout RFC 7301 expects. because the callback returns the first server
+// protocol the client also offered, the order here makes h2 the default for
+// HTTP/2-capable clients while every other client lands on http/1.1.
+static const unsigned char tls_alpn_wire[] =
+    { 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1' };
+
+static int tls_alpn_select(SSL *ssl, const unsigned char **out,
+                           unsigned char *outlen, const unsigned char *in,
+                           unsigned int inlen, void *arg)
+{
+    (void)ssl;
+    (void)arg;
+    const unsigned char *sel = NULL;
+    unsigned char selen = 0;
+    if (SSL_select_next_proto((unsigned char **)&sel, &selen,
+                              tls_alpn_wire, sizeof tls_alpn_wire,
+                              in, inlen) == OPENSSL_NPN_NEGOTIATED) {
+        *out = sel;
+        *outlen = selen;
+    } else {
+        // no overlap: offer nothing rather than aborting the handshake, and
+        // the connection is served as HTTP/1.1
+        *out = tls_alpn_wire;
+        *outlen = 0;
+    }
+    return SSL_TLSEXT_ERR_OK;
+}
+
 static SSL_CTX *tls_ctx_base(char *err, size_t errsz)
 {
     tls_available();
@@ -82,6 +111,7 @@ static SSL_CTX *tls_ctx_base(char *err, size_t errsz)
         }
         return NULL;
     }
+    SSL_CTX_set_alpn_select_cb(ctx, tls_alpn_select, NULL);
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
     SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
     SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
@@ -529,6 +559,15 @@ long tls_send_all(void *sslh, const void *buf, size_t len)
     return (long)sent;
 }
 
+int tls_alpn_is_h2(void *sslh)
+{
+    SSL *ssl = (SSL *)sslh;
+    const unsigned char *proto = NULL;
+    unsigned int len = 0;
+    SSL_get0_alpn_selected(ssl, &proto, &len);
+    return len == 2 && proto != NULL && proto[0] == 'h' && proto[1] == '2';
+}
+
 void tls_close(void *sslh, int fd)
 {
     if (sslh != NULL) {
@@ -589,6 +628,12 @@ void tls_close(void *ssl, int fd)
 {
     (void)ssl;
     net_close(fd);
+}
+
+int tls_alpn_is_h2(void *ssl)
+{
+    (void)ssl;
+    return 0;
 }
 
 #endif // CWEB_OPENSSL

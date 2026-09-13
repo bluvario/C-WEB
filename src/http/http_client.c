@@ -11,6 +11,7 @@
 #include "net.h"
 #include "strbuf.h"
 #include "uri.h"
+#include "file.h"
 #include "xmem.h"
 
 // a hostile or misbehaving peer must not hand us an unbounded body or head
@@ -174,6 +175,18 @@ static int parse_status_line(String_View head, Http_Status *status)
     }
     *status = (Http_Status)code;
     return 0;
+}
+
+// RFC 7230 section 6.3: a response in HTTP/1.0 keeps the connection only when
+// it says so, so a bare 1.0 reply (no Connection: keep-alive) is
+// close-delimited regardless of Content-Length. HTTP/1.1 is persistent unless
+// the head says otherwise.
+static bool head_is_http_1_0(String_View head)
+{
+    static const char tok[] = "HTTP/1.0 ";
+    String_View line = sv_trim_right(sv_chop_by_delim(&head, '\n'));
+    return line.count >= sizeof(tok) - 1 &&
+           memcmp(line.data, tok, sizeof(tok) - 1) == 0;
 }
 
 // ---- incremental chunked decoder ----
@@ -577,6 +590,9 @@ static int read_response(Http_Client *c, Http_Method method,
 
     if (head_has_token(head, "connection", "close")) {
         *conn_dead = true;
+    } else if (head_is_http_1_0(head) &&
+               !head_has_token(head, "connection", "keep-alive")) {
+        *conn_dead = true; // HTTP/1.0 drops the connection unless it is kept
     }
 
     // discard the consumed prefix, keep any pipelined bytes that arrived early
@@ -859,6 +875,30 @@ int http_client_req_post(Http_Client *c, const char *url_or_path, String_View bo
     return http_client_req(c, url_or_path, HTTP_POST, NULL, body, out);
 }
 
+int http_client_req_post_file(Http_Client *c, const char *url_or_path,
+                              const char *file_path, Http_Client_Result *out)
+{
+    if (c == NULL || url_or_path == NULL || file_path == NULL || out == NULL) {
+        return -1;
+    }
+    char *bytes = NULL;
+    size_t len = 0;
+    if (file_read_all(file_path, &bytes, &len) != 0) {
+        fail(out, "cannot read %s", file_path);
+        return -1;
+    }
+    if (len > (size_t)CLIENT_MAX_BODY) {
+        fail(out, "file %s exceeds the %llu-byte upload cap",
+             file_path, CLIENT_MAX_BODY);
+        xfree(bytes);
+        return -1;
+    }
+    int rc = http_client_req(c, url_or_path, HTTP_POST, NULL,
+                             (String_View){bytes, len}, out);
+    xfree(bytes);
+    return rc;
+}
+
 int http_client_request(const char *url, Http_Method method,
                         const char *extra_headers, String_View body,
                         Http_Client_Result *out)
@@ -880,6 +920,18 @@ int http_client_get(const char *url, Http_Client_Result *out)
 int http_client_post(const char *url, String_View body, Http_Client_Result *out)
 {
     return http_client_request(url, HTTP_POST, NULL, body, out);
+}
+
+int http_client_post_file(const char *url, const char *file_path,
+                          Http_Client_Result *out)
+{
+    Http_Client *c = http_client_open(NULL);
+    if (c == NULL) {
+        return -1;
+    }
+    int rc = http_client_req_post_file(c, url, file_path, out);
+    http_client_close(c);
+    return rc;
 }
 
 void http_client_result_free(Http_Client_Result *out)

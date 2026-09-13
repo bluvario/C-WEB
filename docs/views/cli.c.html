@@ -10,7 +10,7 @@ apps, and runs servers with live reload.</p>
   <tr><th>Command</th><th>What it does</th></tr>
   <tr><td><code>cweb build VIEWS OUT [ROOT [STATIC]]</code></td><td>Compile every page under <code>VIEWS</code> into C, emit <code>OUT/main.c</code> and link <code>OUT/server</code>.</td></tr>
   <tr><td><code>cweb serve [--watch] VIEWS [PORT [ROOT [STATIC]]] [FLAGS...]</code></td><td>Build into a scratch dir and run it. With <code>--watch</code>, rebuild and restart on any file change.</td></tr>
-  <tr><td><code>cweb new [--docker] [--systemd] [--login] APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial, a stylesheet and a <code>.gitignore</code>. <code>--docker</code> adds a Dockerfile (build context: the cweb checkout root), <code>--systemd</code> a unit for <code>/opt/APP_DIR</code>, and <code>--login</code> a session-backed signup/login/logout/dashboard app whose users live in the <code>--db</code> store as PBKDF2 hashes.</td></tr>
+  <tr><td><code>cweb new [--docker] [--systemd] [--login] APP_DIR</code></td><td>Scaffold a fresh project: pages, a 404, a layout, a partial, a stylesheet and a <code>.gitignore</code>. <code>--docker</code> adds a Dockerfile (build context: the cweb checkout root), <code>--systemd</code> a unit for <code>/opt/APP_DIR</code>, and <code>--login</code> a session-backed signup/login/logout/dashboard app whose users live in the <code>--db</code> store as PBKDF2 hashes and whose login/signup forms are brute-force throttled (429 + Retry-After).</td></tr>
   <tr><td><code>cweb version</code></td><td>Print the framework version.</td></tr>
 </table>
 
@@ -51,7 +51,7 @@ so both paths honor the same options.</p>
   <tr><td><code>--gzip</code></td><td>Compress compressible response bodies.</td></tr>
   <tr><td><code>--db PATH</code></td><td>Open the file-backed key/value store at PATH, exposed to pages via <code>cweb_database()</code>. Sessions persist to it too. Defaults to the <code>CWEB_DB</code> environment variable when <code>--db</code> is absent.</td></tr>
   <tr><td><code>--static-cache SECONDS</code></td><td>Cache-Control max-age on static files; ETag/Last-Modified still answer 304.</td></tr>
-  <tr><td><code>--etag</code></td><td>Strong ETag (SHA-256) on every dynamic response; matching If-None-Match gets 304.</td></tr>
+  <tr><td><code>--etag</code></td><td>Strong ETag (SHA-256) on every dynamic response; matching If-None-Match gets 304. Stamping <code>last_modified</code> via <code>http_response_set_last_modified</code> extends this to If-Modified-Since validation.</td></tr>
   <tr><td><code>--request-id</code></td><td>Stamp every response (and <code>req->request_id</code>) with a unique trace id.</td></tr>
   <tr><td><code>--request-id-inherit</code></td><td>Also echo an inbound X-Request-Id from a trusted proxy.</td></tr>
   <tr><td><code>--basic-auth USER:PASS</code></td><td>Lock the app behind HTTP Basic auth.</td></tr>

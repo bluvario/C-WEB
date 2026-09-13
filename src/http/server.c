@@ -60,6 +60,7 @@ static const char *const ERROR_BODY = "cweb error page (it hurts us too)\r\n";
 typedef struct {
     Socket_Handle fd;
     void *ssl;
+    bool h2; // the TLS handshake's ALPN picked "h2": serve HTTP/2 directly
 } Http_Io;
 
 static long io_recv(Http_Io *io, void *buf, size_t len)
@@ -459,6 +460,20 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
     // slowloris backstop
     net_set_timeout(io.fd, timeout_ms);
 
+    char peer_buf[INET6_ADDRSTRLEN];
+    String_View remote = peer_ip(io.fd, peer_buf);
+
+    // HTTP/2 over TLS: the handshake's ALPN selected "h2", so the connection
+    // speaks HTTP/2 from byte zero -- no 24-octet client preface (RFC 7540
+    // section 3.5) and no HTTP/1.1 upgrade; the client's first frame is its
+    // SETTINGS. dispatch straight into the HTTP/2 engine on an empty buffer.
+    if (io.h2) {
+        h2_serve(io.fd, io.ssl, handler, user_data, cfg, NULL, 0, NULL,
+                 remote, timeout_ms);
+        rb_free(&rb);
+        return;
+    }
+
     // POSIX-only: request bodies larger than the in-RAM cap spill to a temp
 // file in cfg->body_dir and are mapped back, so oversized uploads stream
 // through a worker without hoarding RAM. Windows keeps the 413. chunked
@@ -470,8 +485,6 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
     size_t spill_written = 0;
 #endif
 
-    char peer_buf[INET6_ADDRSTRLEN];
-    String_View remote = peer_ip(io.fd, peer_buf);
     bool route_timeout_active = false;
 
     // h2c prior knowledge: a connection whose first bytes are the HTTP/2
@@ -495,8 +508,8 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
                 }
             }
             if (memcmp(rb.data, H2_MAGIC, H2_MAGIC_LEN) == 0) {
-                h2_serve(io.fd, handler, user_data, cfg, &rb, H2_MAGIC_LEN,
-                         NULL, remote, timeout_ms);
+                h2_serve(io.fd, NULL, handler, user_data, cfg, &rb,
+                         H2_MAGIC_LEN, NULL, remote, timeout_ms);
                 rb_free(&rb);
                 return;
             }
@@ -733,8 +746,8 @@ static void serve_connection(Http_Io io, Http_Handler_Fn handler,
         // 101 response and the server preface are both produced by h2_serve;
         // nothing is sent over the HTTP/1.1 wire for this request.
         if (io.ssl == NULL && h2_is_upgrade_request(&req)) {
-            h2_serve(io.fd, handler, user_data, cfg, &rb, consumed, &req,
-                     remote, timeout_ms);
+            h2_serve(io.fd, NULL, handler, user_data, cfg, &rb, consumed,
+                     &req, remote, timeout_ms);
             http_request_free(&req);
             rb_free(&rb);
             return;
@@ -826,7 +839,7 @@ void http_serve_connection_config(Socket_Handle client, Http_Handler_Fn handler,
     // plaintext: the public convenience entry point served every
     // connection without a TLS session; the accept loop hands the
     // TLS-wrapped variant to serve_connection directly
-    Http_Io io = {client, NULL};
+    Http_Io io = {client, NULL, false};
     serve_connection(io, handler, user_data, cfg);
 }
 
@@ -850,7 +863,7 @@ static void connection_worker(void *arg)
 {
     Connection_Job *job = arg;
     log_info("client connected");
-    Http_Io io = {job->client, NULL};
+    Http_Io io = {job->client, NULL, false};
     // an encrypted listener greets the peer with a TLS handshake before any
     // HTTP byte; a handshake that never completes is just a dead socket to
     // drop. the fd already carries the read timeout, bounding a slowloris
@@ -863,6 +876,9 @@ static void connection_worker(void *arg)
             xfree(job);
             return;
         }
+        // when the ALPN handshake chose "h2" this connection is HTTP/2 from
+        // its first byte; serve_connection routes on io.h2
+        io.h2 = tls_alpn_is_h2(io.ssl);
     }
     serve_connection(io, job->handler, job->user_data, &job->cfg);
     io_close(&io);

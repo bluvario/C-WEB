@@ -5,7 +5,8 @@
     C-WEB is a web framework where the backend is written in C, embedded
     directly in your HTML files. A `.c.html` page mixes markup and C code;
     the framework compiles those files into a native server binary with a
-    built-in HTTP stack, HTTP/2 (h2c), TLS, WebSocket, SSE, sessions,
+    built-in HTTP stack, HTTP/2 (h2c and h2 over TLS via ALPN), TLS,
+    WebSocket, SSE, sessions,
     middleware and a file-backed database. No interpreter, no dynamic
     language, no runtime to deploy — just one binary.
   </p>
@@ -41,7 +42,7 @@
 <ul>
   <li><strong>The cweb CLI</strong> — scaffold, build and serve an app with three commands.</li>
   <li><strong>Templates</strong> — layout wrapping, partials, HTML escaping, date helpers.</li>
-  <li><strong>HTTP stack</strong> — keep-alive, chunked bodies, streaming, HTTP/2 cleartext, TLS.</li>
+  <li><strong>HTTP stack</strong> — keep-alive, chunked bodies, streaming, HTTP/2 (h2c and TLS), TLS.</li>
   <li><strong>Router</strong> — <code>&lt;name&gt;</code> captures, a catch-all 404, per-route timeouts.</li>
   <li><strong>Sessions</strong> — server-side store, flash messages, CSRF protection.</li>
   <li><strong>Middleware</strong> — security headers, rate limiting, gzip, ETags, CORS, request signing.</li>
@@ -53,6 +54,7 @@
 
 <ul>
   <li><a href="/getting-started">Getting started</a> — build the framework and run your first app.</li>
+  <li><a href="/accounts">The accounts app</a> — a guided tour of the <code>--login</code> scaffold.</li>
   <li><a href="/cli">The cweb CLI</a> — every command and server flag.</li>
   <li><a href="/pages">Pages and templates</a> — the <code>.c.html</code> language in detail.</li>
 </ul>

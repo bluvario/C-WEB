@@ -1,0 +1,157 @@
+<h1>The accounts app</h1>
+
+<p><code>cweb new --login</code> scaffolds the whole account side of an app —
+signup, login, logout and a private dashboard — wired the way the framework
+recommends. This page walks it route by route: what each page does, which
+library pieces it leans on, and what you would change to fit your own app.</p>
+
+<h2>Scaffold and run</h2>
+
+<pre><code>cweb new --login app
+cd app
+cweb serve views 8080 .. static --db app.db</code></pre>
+
+<p>The first command creates <code>views/</code> (index, layout, 404, login,
+signup, logout, dashboard), <code>static/style.css</code> and a
+<code>.gitignore</code>. The second compiles and serves it. Note
+<code>--db app.db</code>: the whole app runs on the file-backed store — users,
+sessions and session-db is what survives a restart.</p>
+
+<h2>The route map</h2>
+
+<table>
+  <tr><th>Route</th><th>Who can see it</th><th>What it does</th></tr>
+  <tr><td><code>/</code> <code>GET</code></td><td>anyone</td><td>The landing page, with a nav that swaps between the auth links and a Dashboard/Logout bar once a session exists.</td></tr>
+  <tr><td><code>/signup</code> <code>GET</code>/<code>POST</code></td><td>anyone (POST throttled)</td><td>Create an account: validates the password (8+ chars), hashes it with PBKDF2, auto-logs-in and redirects to /dashboard.</td></tr>
+  <tr><td><code>/login</code> <code>GET</code>/<code>POST</code></td><td>anyone (POST throttled)</td><td>Check a username/password against the stored hash; on success rotate the CSRF token, issue a session cookie and redirect.</td></tr>
+  <tr><td><code>/logout</code> <code>POST</code> only</td><td>session holder</td><td>CSRF-checked; destroys the session, empties the cookie, redirects to <code>/</code>. A GET just lands on /dashboard.</td></tr>
+  <tr><td><code>/dashboard</code> <code>GET</code>/<code>POST</code></td><td>session holder</td><td>The private page: no session cookie, no bytes rendered — a 303 straight to <code>/login</code>.</td></tr>
+  <tr><td><code>/404</code></td><td>—</td><td>The scaffold's custom not-found page.</td></tr>
+</table>
+
+<h2>Signup: the write path</h2>
+
+<p>The POST branch does, in order: throttle-check, input checks, then</p>
+
+<pre><code>&lt;?c
+  char key[512];
+  snprintf(key, sizeof key, "user:%s", username);
+  if (cweb_db_get(db, sv_from_cstr(key)).count &gt; 0) {
+      error = "that username is taken";
+  } else {
+      char hash[CWEB_PASSWORD_HASH_MAX];
+      cweb_password_hash(password, 0, hash, sizeof hash);
+      cweb_db_put(db, sv_from_cstr(key), sv_from_cstr(hash));
+      cweb_db_sync(db);
+      char *token = http_session_create(sessions, 3600);
+      Http_Session *sesh = http_session_open(sessions, token);
+      http_session_set(sesh, "username", username);
+      http_csrf_rotate(sesh);
+      http_session_issue_cookie(res, "cweb_session", token, NULL);
+      http_response_redirect(res, HTTP_303_SEE_OTHER, "/dashboard");
+  }
+?&gt;</code></pre>
+
+<p>Three things worth stealing:</p>
+
+<ul>
+  <li><strong>Users are db rows.</strong> An account is the single key
+    <code>user:&lt;name&gt;</code> holding a PBKDF2-HMAC-SHA256 hash (see
+    <code>cweb_password_hash</code> in <a href="/api">password.h</a>). No
+    schema, no table; <code>--db</code> is just a string-keyed store.</li>
+  <li><strong>Signup auto-logs-in.</strong> One session created, one
+    <code>username</code> claim, the CSRF token rotated to the fresh session —
+    a token minted before authentication can never be replayed against it.</li>
+  <li><strong>Passwords never reach the page.</strong> Only the digest is
+    stored, and <code>cweb_password_verify</code> runs in constant time on the
+    login side.</li>
+</ul>
+
+<div class="note">
+  <strong>Note:</strong> making the pre-auth CSRF token a null session is a
+  deliberate pattern: <code>http_session_from_cookie</code> on an anonymous
+  visitor returns NULL, so the auth forms carry no token until one exists.
+</div>
+
+<h2>Login: the check path</h2>
+
+<p>Nearly the reverse, plus two guards a signup does not need:</p>
+
+<pre><code>&lt;?c
+  if (cweb_login_throttle(req, res, params, "username") != 0) {
+      return; // a 429 with Retry-After is already on the wire
+  }
+  ...
+  if (cweb_password_verify(password, hash) == 1) {
+      ... create session, rotate CSRF, Set-Cookie, 303 /dashboard ...
+  }
+  error = "username or password is wrong";
+?&gt;</code></pre>
+
+<p>The <em>same</em> error string for an unknown user and a bad password keeps
+an attacker from probing which usernames exist. And the throttle is checked
+before the expensive part: <code>cweb_password_verify</code> is PBKDF2 and
+takes the better part of a second; the bucket guard stops a guesser from ever
+reaching it once the budget is spent.</p>
+
+<h2>The brute-force guard</h2>
+
+<p>Every generated app — accounts or not — links a
+<code>cweb_login_throttle</code> helper, driven by the rate limiter the
+<a href="/middleware">middleware</a> docs use globally. The scaffold calls it
+with the policy that fits auth flows:</p>
+
+<ul>
+  <li><strong>Login keys on the claimed username.</strong> Hammer one account
+    and <em>that account</em> dries up (rate 1/s, burst 3) while every other
+    user's form still works. The bucketed key is the username the client
+    submitted, so an attacker who rotates names gets a fresh budget per name
+    — exactly the trade-off a per-account guard makes.</li>
+  <li><strong>Signup keys on the caller's address</strong>
+    (<code>username_key == NULL</code>): account-creation floods are capped by
+    source rather than by an endless supply of new names.</li>
+  <li><strong>A dry bucket answers 429</strong> with a <code>Retry-After</code>
+    and a plain-text reason; the helper returns -1 so the page returns
+    immediately. No PBKDF2 burn, no form re-render.</li>
+</ul>
+
+<p>Try it with curl: six wrong logins in a row get you the first guesses
+answered normally, then a visible wall.</p>
+
+<pre><code>for i in 1 2 3 4 5 6 7 8; do \
+  curl -s -o /dev/null -w "%{http_code} " \
+    -d "username=alice&password=bad-$i" http://localhost:8080/login; done; echo
+# 200 200 200 200 200 200 429 429</code></pre>
+
+<h2>Logout and the private page</h2>
+
+<p>The logout form lives on the dashboard and posts through a CSRF token; the
+handler destroys the session server-side and clears the cookie with an empty
+value — the token is dead in both places. The dashboard is the template for
+every gated page: look the cookie up, bounce when it is missing, render only
+then.</p>
+
+<h2>What to change for your app</h2>
+
+<ul>
+  <li><strong>Session lifetime</strong> — <code>http_session_create(sessions, 3600)</code>: replace 3600 (seconds) with your idle policy, or
+    <code>-1</code> for the store default.</li>
+  <li><strong>Cookie name</strong> — <code>cweb_session</code> in
+    <code>http_session_from_cookie</code> and
+    <code>http_session_issue_cookie</code>; change it everywhere at once.</li>
+  <li><strong>Password policy</strong> — the 8-character floor is in
+    <code>signup.c.html</code>; the hash iteration count is the second
+    argument of <code>cweb_password_hash</code> (0 picks the default).</li>
+  <li><strong>Throttle budget</strong> — <code>http_rate_limiter_init(&amp;cweb_login_rl, 1.0, 3.0)</code> in the generated <code>main.c</code>: tokens per
+    second, then burst.</li>
+  <li><strong>Key prefix</strong> — <code>user:</code> duplicates to other
+    namespaces are fine, just keep one prefix per kind of row.</li>
+</ul>
+
+<h2>Next</h2>
+
+<ul>
+  <li><a href="/sessions">Sessions</a> — what the cookie actually buys you.</li>
+  <li><a href="/middleware">Middleware</a> — the rate limiter this app leans on.</li>
+  <li><a href="/database">Database</a> — the store users persist to.</li>
+</ul>

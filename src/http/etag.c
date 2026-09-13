@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "hmac.h"
+#include "date.h"
 #include "http.h"
 #include "request.h"
 #include "response.h"
@@ -105,6 +106,25 @@ void http_etag_middleware(Http_Request *req, Http_Response *res,
     if (inm != NULL && inm->count > 0 && inm_matches(*inm, tag)) {
         res->status = HTTP_304_NOT_MODIFIED;
         res->body.count = 0;
+    } else {
+        // RFC 9110 section 13.1.3: when the handler stamped a Last-Modified
+        // (via http_response_set_last_modified) and the client's
+        // If-Modified-Since is not earlier, the representation is unchanged
+        // and the validator applies. If-None-Match above takes precedence
+        // when both arrive. HTTP-dates carry one-second precision, so equal
+        // timestamps validate.
+        const String_View *ims = http_request_get_header(req, "If-Modified-Since");
+        char *lm = owned != NULL ? NULL : http_response_get_header(res, "Last-Modified");
+        if (ims != NULL && ims->count > 0 && lm != NULL) {
+            time_t if_modified = http_date_parse(*ims);
+            time_t last_modified = http_date_parse(sv_from_cstr(lm));
+            if (if_modified != (time_t)-1 && last_modified != (time_t)-1 &&
+                if_modified >= last_modified) {
+                res->status = HTTP_304_NOT_MODIFIED;
+                res->body.count = 0;
+            }
+        }
+        free(lm);
     }
     free(owned);
 }

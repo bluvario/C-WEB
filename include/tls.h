@@ -65,6 +65,14 @@ long tls_send_all(void *ssl, const void *buf, size_t len);
 
 void tls_close(void *ssl, int fd);
 
+// every TLS listener advertises "h2" and "http/1.1" via ALPN (RFC 7301) so a
+// client that speaks HTTP/2 negotiates it at handshake time and is served
+// HTTP/2 over TLS (RFC 7540 section 3.5) without an h2c preface. returns 1
+// when the session's negotiated protocol was h2, 0 when the client offered
+// nothing or picked http/1.1 -- in both cases the connection is served as
+// HTTP/1.1.
+int tls_alpn_is_h2(void *ssl);
+
 #else // !CWEB_OPENSSL -- static inline stubs so the library links without -lssl
 
 #include <stdio.h>
@@ -166,6 +174,12 @@ static inline void tls_close(void *ssl, int fd)
 {
     (void)ssl;
     net_close(fd);
+}
+
+static inline int tls_alpn_is_h2(void *ssl)
+{
+    (void)ssl;
+    return 0;
 }
 
 #endif // CWEB_OPENSSL

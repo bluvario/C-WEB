@@ -50,6 +50,9 @@ the names matter; the comments in each header carry the details.</p>
 <code>void http_response_init / free (Http_Response *res);</code><br>
 <code>void http_response_set_status(Http_Response *res, Http_Status status);</code><br>
 <code>void http_response_set_header(Http_Response *res, const char *name, const char *value);</code><br>
+<code>void http_response_set_last_modified(Http_Response *res, time_t modified);</code> — stamps an
+RFC 7231 Last-Modified header so the etag middleware can validate repeats with
+If-Modified-Since<br>
 <code>void http_response_append_header(Http_Response *res, const char *name, const char *value);</code><br>
 <code>char *http_response_get_header(Http_Response *res, const char *name);</code><br>
 <code>bool http_response_has_header(Http_Response *res, const char *name);</code><br>
@@ -169,7 +172,9 @@ server all read the same numbers without locking.</p>
 <code>int http_gzip_decompress(const char *src, size_t len, size_t cap, unsigned char **out, size_t *out_len);</code><br>
 <code>void http_gzip_middleware(...);</code><br>
 <code>void http_cors_middleware(...);</code><br>
-<code>void http_etag_middleware(...);</code>
+<code>void http_etag_middleware(...);</code> — strong ETag on dynamic bodies (SHA-256,
+or the handler's own when set); If-None-Match and handler-stamped
+Last-Modified / If-Modified-Since both validate to 304
 </span>
 
 <h2>auth.h / request_sign.h / request_id.h / client_ip.h / ip.h</h2>
@@ -212,7 +217,10 @@ answers 401/403 (or 303 redirects to login/forbidden paths) by role<br>
 <h2>http_client.h / proxy.h</h2>
 <span class="api">
 <code>int http_client_req(Http_Client *c, const char *url_or_path, Http_Method method, const char *extra_headers, String_View body, Http_Client_Result *out);</code><br>
+<code>int http_client_req_post_file(Http_Client *c, const char *url_or_path, const char *file_path, Http_Client_Result *out);</code> — POSTs a whole
+file on the persistent connection (read briefly, 32 MiB cap)<br>
 <code>int http_client_get(const char *url, Http_Client_Result *out) / http_client_post(const char *url, String_View body, Http_Client_Result *out);</code><br>
+<code>int http_client_post_file(const char *url, const char *file_path, Http_Client_Result *out);</code> — one-shot file upload<br>
 <code>void http_client_result_free(Http_Client_Result *out);</code><br>
 <code>int http_proxy_mount(Http_Router *r, const char *url_prefix, const char *upstream_base);</code><br>
 <code>void http_reverse_proxy(Http_Request *req, Http_Response *res, void *user_data);</code><br>
@@ -272,7 +280,10 @@ answers 401/403 (or 303 redirects to login/forbidden paths) by role<br>
 <h2>h2.h / hpack.h</h2>
 <span class="api">
 <code>#define H2_MAGIC "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"</code><br>
-<code>void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data, const Http_Server_Config *cfg, Read_Buffer *rb, size_t consumed, Http_Request *upgrade_req, String_View remote, unsigned long default_timeout_ms);</code><br>
+<code>void h2_serve(Socket_Handle fd, Http_Handler_Fn handler, void *user_data, const Http_Server_Config *cfg, Read_Buffer *rb, size_t consumed, Http_Request *upgrade_req, String_View remote, unsigned long default_timeout_ms);</code> — feeds both h2c
+(prior knowledge and upgrade) and, when <code>tls_alpn_is_h2</code> won, the
+ALPN-negotiated TLS stream; the redundant connection preface a stacked client
+sends over TLS is recognized and discarded here<br>
 <code>bool h2_is_upgrade_request(const Http_Request *req);</code><br>
 <code>void hpack_init / hpack_free / hpack_set_max_table_size / hpack_decode_block / hpack_encode_status / hpack_encode_field (...);</code>
 </span>
@@ -280,6 +291,9 @@ answers 401/403 (or 303 redirects to login/forbidden paths) by role<br>
 <h2>tls.h</h2>
 <span class="api">
 <code>int tls_available(void);</code><br>
+<code>int tls_alpn_is_h2(void *ssl);</code> — true when the finished handshake's ALPN
+negotiated <code>h2</code>, which the connection loop checks to route the
+stream onto the multiplexed framing<br>
 <code>void *tls_server_ctx_new(const char *cert, const char *key, char *err, size_t errsz);</code><br>
 <code>int tls_self_signed_pem(const char *cn, const char **extra_dns, long days, char *err, size_t errsz, char **cert_pem, char **key_pem);</code><br>
 <code>int tls_self_signed_paths(const char *dir, const char *name, char *cert_out, size_t certsz, char *key_out, size_t keysz, int *created, char *err, size_t errsz);</code><br>
@@ -297,7 +311,12 @@ in the generated <code>pages.h</code>:</p>
 <code>void cweb_layout_use(Http_Request *req, const char *name);</code> — opt the
 current page into <code>views/layout-NAME.c.html</code> instead of the default
 <code>layout.c.html</code>; pass a string literal (the pointer is borrowed), and
-anything unknown falls back to the default shell
+anything unknown falls back to the default shell<br>
+<code>int cweb_login_throttle(Http_Request *req, Http_Response *res, Str_Map *params, const char *username_key);</code> —
+brute-force guard emitted in every generated app: keys on the claimed username
+(auth forms) or on the caller's address (signup, <code>username_key == NULL</code>),
+answers 429 + Retry-After once a small burst is spent, and returns -1 so the
+page can abort its POST
 </span>
 
 <h2>Hand-written servers</h2>

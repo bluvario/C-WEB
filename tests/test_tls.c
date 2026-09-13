@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "gzip.h"
+#include "hpack.h"
 #include "log.h"
 #include "net.h"
 #include "server.h"
@@ -142,6 +143,315 @@ static int substr_count(const char *haystack, const char *needle)
     return count;
 }
 
+// ---- minimal HTTP/2-over-TLS client -----------------------------------
+// over TLS there is no 24-octet client preface (RFC 7540 section 3.5): the
+// connection starts with the SETTINGS frame. this client negotiates ALPN on
+// the handshake, sends its SETTINGS, hpack-encodes one GET and reads back
+// the response headers + body, ACKing the server's settings along the way.
+
+enum {
+    TH2_FRAME_HDR = 9,
+    TH2_DATA = 0x0,
+    TH2_HEADERS = 0x1,
+    TH2_SETTINGS = 0x4,
+    TH2_F_ACK = 0x1,
+    TH2_F_END_STREAM = 0x1,
+    TH2_F_END_HEADERS = 0x4,
+};
+
+typedef struct {
+    Socket_Handle fd;
+    SSL *ssl;
+    Hpack hp;
+    Strbuf in;
+    uint8_t staging[8192];
+} Th2;
+
+// advertises a single ALPN protocol on the client side
+static int th2_set_alpn(SSL *ssl, const char *proto)
+{
+    unsigned char wire[32];
+    size_t n = strlen(proto);
+    if (n == 0 || n > 31) {
+        return -1;
+    }
+    wire[0] = (unsigned char)n;
+    memcpy(wire + 1, proto, n);
+    return SSL_set_alpn_protos(ssl, wire, (unsigned int)n + 1);
+}
+
+static int th2_open(Th2 *c, int port, const char *alpn)
+{
+    memset(c, 0, sizeof *c);
+    c->fd = net_connect("127.0.0.1", port);
+    if (c->fd == -1) {
+        return -1;
+    }
+    net_set_timeout(c->fd, 15000);
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    client_ctx_init(ctx);
+    c->ssl = SSL_new(ctx);
+    if (c->ssl == NULL) {
+        SSL_CTX_free(ctx);
+        net_close(c->fd);
+        return -1;
+    }
+    if (alpn != NULL && th2_set_alpn(c->ssl, alpn) != 0) {
+        SSL_free(c->ssl);
+        SSL_CTX_free(ctx);
+        net_close(c->fd);
+        return -1;
+    }
+    SSL_set_fd(c->ssl, (int)c->fd);
+    if (SSL_connect(c->ssl) != 1) {
+        SSL_free(c->ssl);
+        SSL_CTX_free(ctx);
+        net_close(c->fd);
+        return -1;
+    }
+    SSL_CTX_free(ctx); // SSL_new keeps a reference, so this is safe here
+    hpack_init(&c->hp);
+    strbuf_init(&c->in);
+    return 0;
+}
+
+static void th2_close(Th2 *c)
+{
+    SSL_free(c->ssl);
+    hpack_free(&c->hp);
+    strbuf_free(&c->in);
+    net_close(c->fd);
+}
+
+static int th2_write_frame(Th2 *c, uint8_t type, uint8_t flags, uint32_t sid,
+                           const void *payload, size_t len)
+{
+    uint8_t h[TH2_FRAME_HDR];
+    h[0] = (uint8_t)(len >> 16);
+    h[1] = (uint8_t)(len >> 8);
+    h[2] = (uint8_t)len;
+    h[3] = type;
+    h[4] = flags;
+    h[5] = (uint8_t)((sid >> 24) & 0x7f);
+    h[6] = (uint8_t)(sid >> 16);
+    h[7] = (uint8_t)(sid >> 8);
+    h[8] = (uint8_t)sid;
+    if (SSL_write(c->ssl, h, sizeof h) != (int)sizeof h) {
+        return -1;
+    }
+    if (len > 0 && SSL_write(c->ssl, payload, (int)len) != (int)len) {
+        return -1;
+    }
+    return 0;
+}
+
+// 1 on bytes, 0 on orderly close, -1 on error
+static int th2_read_into(Th2 *c)
+{
+    char tmp[8192];
+    int n = SSL_read(c->ssl, tmp, sizeof tmp);
+    if (n > 0) {
+        strbuf_append(&c->in, tmp, (size_t)n);
+        return 1;
+    }
+    return n == 0 ? 0 : -1;
+}
+
+static int th2_ensure(Th2 *c, size_t need)
+{
+    while (c->in.count < need) {
+        int r = th2_read_into(c);
+        if (r <= 0) {
+            return r;
+        }
+    }
+    return 1;
+}
+
+// like hc_next_frame: the server's SETTINGS are ACKed and skipped, every
+// other frame is handed to the caller (payload valid until the next frame)
+static int th2_next_frame(Th2 *c, uint8_t *type, uint8_t *flags, uint32_t *sid,
+                          const uint8_t **payload, size_t *len)
+{
+    for (;;) {
+        if (th2_ensure(c, TH2_FRAME_HDR) <= 0) {
+            return -1;
+        }
+        const uint8_t *h = (const uint8_t *)c->in.items;
+        size_t flen = ((size_t)h[0] << 16) | ((size_t)h[1] << 8) | h[2];
+        if (th2_ensure(c, TH2_FRAME_HDR + flen) <= 0) {
+            return -1;
+        }
+        memcpy(c->staging, c->in.items + TH2_FRAME_HDR, flen);
+        memmove(c->in.items, c->in.items + TH2_FRAME_HDR + flen,
+                c->in.count - TH2_FRAME_HDR - flen);
+        c->in.count -= TH2_FRAME_HDR + flen;
+        uint8_t t = h[3];
+        uint8_t f = h[4];
+        uint32_t s = ((uint32_t)(h[5] & 0x7f) << 24) | ((uint32_t)h[6] << 16) |
+                     ((uint32_t)h[7] << 8) | h[8];
+        if (t == TH2_SETTINGS && !(f & TH2_F_ACK)) {
+            th2_write_frame(c, TH2_SETTINGS, TH2_F_ACK, 0, NULL, 0);
+            continue;
+        }
+        *type = t;
+        *flags = f;
+        *sid = s;
+        *payload = c->staging;
+        *len = flen;
+        return 1;
+    }
+}
+
+// reads one complete response on sid; *status is the :status value, the body
+// accumulates across DATA frames. 0 on success, -1 on framing trouble.
+static int th2_read_response(Th2 *c, uint32_t sid, int *status, Strbuf *body)
+{
+    Strbuf hb;
+    size_t body_cap = 0;
+    strbuf_init(&hb);
+    for (;;) {
+        uint8_t type, flags;
+        uint32_t f_sid;
+        const uint8_t *pl;
+        size_t plen;
+        int r = th2_next_frame(c, &type, &flags, &f_sid, &pl, &plen);
+        if (r <= 0) {
+            strbuf_free(&hb);
+            return -1;
+        }
+        if (f_sid != sid) {
+            continue;
+        }
+        if (type == TH2_HEADERS) {
+            strbuf_append(&hb, (const char *)pl, plen);
+            if (!(flags & TH2_F_END_HEADERS)) {
+                continue;
+            }
+            Hpack_Decoded dec = { 0 };
+            if (hpack_decode_block(&c->hp, (const uint8_t *)hb.items,
+                                   hb.count, &dec) < 0) {
+                strbuf_free(&hb);
+                return -1;
+            }
+            for (size_t i = 0; i < dec.count; i++) {
+                if (sv_equal(dec.items[i].name, sv_from_cstr(":status")) &&
+                    *status == 0) {
+                    char tmp[16];
+                    size_t n = dec.items[i].value.count < sizeof tmp - 1
+                                   ? dec.items[i].value.count
+                                   : sizeof tmp - 1;
+                    memcpy(tmp, dec.items[i].value.data, n);
+                    tmp[n] = '\0';
+                    *status = atoi(tmp);
+                }
+            }
+            hpack_decoded_free(&dec);
+            if (flags & TH2_F_END_STREAM) {
+                strbuf_free(&hb);
+                return 0;
+            }
+            continue;
+        }
+        if (type == TH2_DATA) {
+            if (body_cap + plen > 256u * 1024u) {
+                strbuf_free(&hb);
+                return -1;
+            }
+            body_cap += plen;
+            strbuf_append(body, (const char *)pl, plen);
+            if (flags & TH2_F_END_STREAM) {
+                strbuf_free(&hb);
+                return 0;
+            }
+            continue;
+        }
+    }
+}
+
+// h2 transport + ALPN via the same TLS listener: an h2 client is served
+// HTTP/2 over TLS, an http/1.1 client still gets HTTP/1.1
+static int test_h2_alpn(int port)
+{
+    Th2 c;
+    if (th2_open(&c, port, "h2") != 0) {
+        fprintf(stderr, "TH2: h2 alpn connect failed\n");
+        return 0;
+    }
+    const unsigned char *neg = NULL;
+    unsigned int neglen = 0;
+    SSL_get0_alpn_selected(c.ssl, &neg, &neglen);
+    int ok = neglen == 2 && neg[0] == 'h' && neg[1] == '2';
+    if (!ok) {
+        fprintf(stderr, "TH2: ALPN did not negotiate h2\n");
+        th2_close(&c);
+        return 0;
+    }
+
+    // client preface over TLS is just the settings frame
+    ok = th2_write_frame(&c, TH2_SETTINGS, 0, 0, NULL, 0) == 0;
+    Strbuf blk;
+    strbuf_init(&blk);
+    hpack_encode_field(&blk, sv_from_cstr(":method"), sv_from_cstr("GET"));
+    hpack_encode_field(&blk, sv_from_cstr(":scheme"), sv_from_cstr("https"));
+    hpack_encode_field(&blk, sv_from_cstr(":path"), sv_from_cstr("/h2"));
+    hpack_encode_field(&blk, sv_from_cstr(":authority"),
+                       sv_from_cstr("localhost"));
+    ok = ok &&
+         th2_write_frame(&c, TH2_HEADERS, TH2_F_END_HEADERS | TH2_F_END_STREAM,
+                         1, blk.items, blk.count) == 0;
+    strbuf_free(&blk);
+
+    int status = 0;
+    Strbuf body;
+    strbuf_init(&body);
+    int r = th2_read_response(&c, 1, &status, &body);
+    ok = ok && r == 0 && status == 200 &&
+         body.count == strlen("hello tls") &&
+         memcmp(body.items, "hello tls", body.count) == 0;
+    if (!ok) {
+        fprintf(stderr, "TH2: response status=%d body=%.*s read=%d\n", status,
+                (int)body.count, body.count ? body.items : "", r);
+    }
+    strbuf_free(&body);
+    th2_close(&c);
+
+    if (!ok) {
+        return 0;
+    }
+
+    // a client that offers only http/1.1 must still get HTTP/1.1 served
+    if (th2_open(&c, port, "http/1.1") != 0) {
+        fprintf(stderr, "TH2: http/1.1 alpn connect failed\n");
+        return 0;
+    }
+    SSL_get0_alpn_selected(c.ssl, &neg, &neglen);
+    ok = neglen == 8 && memcmp(neg, "http/1.1", 8) == 0;
+    char buf[4096];
+    size_t got = 0;
+    if (ok) {
+        const char *req = "GET /plain HTTP/1.1\r\nHost: tls.test\r\n"
+                          "Connection: close\r\n\r\n";
+        if (SSL_write(c.ssl, req, (int)strlen(req)) > 0) {
+            long n;
+            while (got < sizeof buf - 1 &&
+                   (n = SSL_read(c.ssl, buf + got,
+                                 (int)(sizeof buf - 1 - got))) > 0) {
+                got += (size_t)n;
+            }
+        }
+        buf[got] = '\0';
+        ok = strstr(buf, "HTTP/1.1 200 OK") != NULL &&
+             strstr(buf, "hello tls") != NULL;
+    }
+    if (!ok) {
+        fprintf(stderr, "TH2: http/1.1 alpn request failed: %s\n",
+                ok && got == 0 ? "" : buf);
+    }
+    th2_close(&c);
+    return ok;
+}
+
 int main(void)
 {
     if (!tls_available()) {
@@ -264,6 +574,10 @@ int main(void)
                                 "\r\n"));
     ok = ok && resp != NULL && strstr(resp, "HTTP/1.1 200 OK") != NULL;
     free(resp);
+
+    // 5: ALPN on the same listener: "h2" is served as HTTP/2 over TLS and
+    // "http/1.1" is still served as HTTP/1.1
+    ok = ok && test_h2_alpn(port);
 
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);

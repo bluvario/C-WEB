@@ -375,6 +375,14 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "// page as user_data; sessions live for an hour of inactivity\n"
         "static Http_Session_Store cweb_sessions;\n"
         "\n"
+        "// brute-force guard for the --login scaffold's /login and /signup\n"
+        "// POSTs: a token bucket serving at most three attempts per key in a\n"
+        "// row (then one token/second), so a cracker cannot hammer the\n"
+        "// password check or pour in accounts. login buckets the claimed\n"
+        "// username, so guessing one account from many addresses still drains\n"
+        "// a single budget; signup buckets the caller's address.\n"
+        "static Http_RateLimiter cweb_login_rl;\n"
+        "\n"
         "// the store behind cweb_database(), opened from --db PATH. zeroed until\n"
         "// then, so pages that call the accessor before it is open get NULL\n"
         "static Cweb_Db cweb_database_impl;\n"
@@ -382,6 +390,43 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "Cweb_Db *cweb_database(void)\n"
         "{\n"
         "    return cweb_database_open ? &cweb_database_impl : NULL;\n"
+        "}\n"
+        "\n"
+        "// one login/signup attempt costs a token from the caller's bucket.\n"
+        "// username_key names the form field whose value owns the bucket, so\n"
+        "// /login passes \"username\" and a sustained guess on one account pays\n"
+        "// for all of its addresses; NULL keys on the caller's address, for\n"
+        "// signup floods. returns 0 when the attempt may proceed; -1 when the\n"
+        "// bucket is dry, in which case the response is already a 429 with a\n"
+        "// Retry-After hint and the page should stop.\n"
+        "int cweb_login_throttle(Http_Request *req, Http_Response *res,\n"
+        "                        Str_Map *params, const char *username_key)\n"
+        "{\n"
+        "    const char *username = NULL;\n"
+        "    if (username_key != NULL) {\n"
+        "        username = strmap_get_cstr(params, username_key);\n"
+        "    }\n"
+        "    String_View key = (username != NULL && username[0] != '\\0')\n"
+        "                          ? sv_from_cstr(username)\n"
+        "                          : http_rate_limit_user_key(req, NULL);\n"
+        "    if (http_rate_limiter_allow(&cweb_login_rl, key) == 0) {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    Http_RateLimit_Status st;\n"
+        "    http_rate_limiter_status(&cweb_login_rl, key, &st);\n"
+        "    int reset = st.reset > 0 ? st.reset : 1;\n"
+        "    char retry[32];\n"
+        "    snprintf(retry, sizeof retry, \"%d\", reset);\n"
+        "    char body[192];\n"
+        "    int bn = snprintf(body, sizeof body,\n"
+        "                      \"too many attempts, try again in %d seconds\\n\",\n"
+        "                      reset);\n"
+        "    http_response_set_status(res, HTTP_429_TOO_MANY_REQUESTS);\n"
+        "    http_response_set_header(res, \"Retry-After\", retry);\n"
+        "    http_response_set_header(res, \"Content-Type\",\n"
+        "                             \"text/plain; charset=utf-8\");\n"
+        "    http_response_add_body(res, (String_View){ body, (size_t)bn });\n"
+        "    return -1;\n"
         "}\n"
         "\n"
         "// Cache-Control max-age for the static root, from --static-cache\n"
@@ -931,7 +976,10 @@ static void emit_main(FILE *f, const Str_List *views, const char *static_root, i
         "    // a restart as long as the same database file is passed again\n"
         "    if (cweb_database_open) {\n"
         "        http_session_store_set_db(&cweb_sessions, &cweb_database_impl);\n"
-        "    }\n",
+        "    }\n"
+        "    // the login scaffold's brute-force budget: three attempts up\n"
+        "    // front, then one token refilled per second (steady-state cap)\n"
+        "    http_rate_limiter_init(&cweb_login_rl, 1.0, 3.0);\n",
         f);
 
     for (size_t i = 0; i < views->count; i++) {
@@ -1244,6 +1292,7 @@ fputs(
         "    }\n"
         "    http_session_store_dump(&cweb_sessions);\n"
         "    http_session_store_free(&cweb_sessions);\n"
+        "    http_rate_limiter_free(&cweb_login_rl);\n"
         "    if (clf_file != NULL) {\n"
         "        log_set_clf(NULL);\n"
         "        fclose(clf_file);\n"
@@ -1450,6 +1499,15 @@ static int cmd_build(int argc, char **argv)
         " * anything unknown (or NULL) falls back to layout.c.html. the pointer\n"
         " * is borrowed - pass a string literal, not a buffer. */\n"
         "void cweb_layout_use(Http_Request *req, const char *name);\n"
+        "\n"
+        "/* brute-force guard used by the --login scaffold's /login and /signup\n"
+        " * POSTs (see the generated main.c for the implementation): call it at\n"
+        " * the top of the POST branch and return when it returns -1 -- the\n"
+        " * response is already the 429. username_key owns the bucket (\n"
+        " * \"username\" for login), NULL falls back to the caller's address\n"
+        " * (signup). */\n"
+        "int cweb_login_throttle(Http_Request *req, Http_Response *res,\n"
+        "                        Str_Map *params, const char *username_key);\n"
         "#endif\n",
         f);
     fclose(f);
@@ -1469,6 +1527,12 @@ static int cmd_build(int argc, char **argv)
         strbuf_append_char(&cc, ' ');
         strbuf_append_cstr(&cc, cwflags);
     }
+#ifdef CWEB_OPENSSL
+    // the build tree provides the real TLS transport in libcweb.a and the
+    // app links -lssl below; the define keeps tls.h from resolving to its
+    // no-OpenSSL stubs in the generated sources
+    strbuf_append_cstr(&cc, " -DCWEB_OPENSSL");
+#endif
     strbuf_append_cstr(&cc, " -std=c11 -Wall -Wextra -Werror -I");
     strbuf_append_shell_quoted(&cc, root);
     strbuf_append_cstr(&cc, "/include -I");
@@ -1609,6 +1673,9 @@ static int write_login_scaffold(const char *app_dir)
         "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
         "  const char *error = NULL;\n"
         "  if (req->method == HTTP_POST) {\n"
+        "      if (cweb_login_throttle(req, res, params, \"username\") != 0) {\n"
+        "          return;\n"
+        "      }\n"
         "      const char *username = strmap_get_cstr(params, \"username\");\n"
         "      const char *password = strmap_get_cstr(params, \"password\");\n"
         "      Cweb_Db *db = cweb_database();\n"
@@ -1657,6 +1724,9 @@ static int write_login_scaffold(const char *app_dir)
         "  Http_Session_Store *sessions = (Http_Session_Store *)user_data;\n"
         "  const char *error = NULL;\n"
         "  if (req->method == HTTP_POST) {\n"
+        "      if (cweb_login_throttle(req, res, params, NULL) != 0) {\n"
+        "          return;\n"
+        "      }\n"
         "      const char *username = strmap_get_cstr(params, \"username\");\n"
         "      const char *password = strmap_get_cstr(params, \"password\");\n"
         "      Cweb_Db *db = cweb_database();\n"

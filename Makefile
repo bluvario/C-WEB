@@ -17,7 +17,7 @@ ifeq ($(OPENSSL),1)
   TESTS_PLUS_TLS := test_tls
 endif
 
-TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_gzip test_cors test_etag test_db test_notes test_unix test_cli test_login test_flash test_csrf test_validate test_hmac test_sign test_ws test_request_id test_basic_auth test_ip test_client_ip test_hpack test_h2 test_password test_env test_stats test_layout $(TESTS_PLUS_TLS)
+TESTS := test_version test_strbuf test_da test_file test_sv test_log test_strmap test_url test_base64 test_buffer test_escape test_path test_http test_request test_response test_date test_params test_mime test_route test_net test_server test_router test_static test_negotiate test_cookie test_multipart test_auth test_security test_thread test_pool test_stream test_shutdown test_sse test_json test_uri test_http_client test_proxy test_template test_middleware test_session test_rate_limit test_gzip test_cors test_etag test_db test_notes test_unix test_cli test_login test_scaffold_login test_flash test_csrf test_validate test_hmac test_sign test_ws test_request_id test_basic_auth test_ip test_client_ip test_hpack test_h2 test_password test_env test_stats test_layout $(TESTS_PLUS_TLS)
 
 DEPS := $(shell find include src -name '*.h')
 

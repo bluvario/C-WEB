@@ -1,8 +1,30 @@
 <h1>HTTP/2</h1>
 
-<p>C-WEB serves HTTP/2 over cleartext — <strong>h2c</strong> for short — as a
-peer of HTTP/1.1, decided per connection. No separate port, no ALPN dance: a
-client that speaks h2c gets h2c, a client that does not stays on 1.1.</p>
+<p>C-WEB speaks HTTP/2 on both of its transports — cleartext
+(<strong>h2c</strong>) and over TLS — alongside HTTP/1.1, decided per
+connection. No separate port either way: a client that negotiates h2 gets h2,
+a client that does not stays on 1.1.</p>
+
+<h2>HTTP/2 over TLS</h2>
+
+<p>When OpenSSL is present and the server listens with <code>--tls</code>, the
+TLS handshake negotiates the protocol via <strong>ALPN</strong>: the server
+advertises <code>h2</code> and <code>http/1.1</code>, and a client that picks
+<code>h2</code> starts the multiplexed framing immediately after the
+handshake — no upgrade round-trip on the wire. Browsers and curl do this
+automatically; verify with curl's status line:</p>
+
+<pre><code>curl --http2 -k https://localhost:8443/
+# HTTP/2.0 200</code></pre>
+
+<div class="note">
+  <strong>Note:</strong> nghttp2-based clients (curl 8.22 and up, browsers)
+  send the 24-byte h2c connection preface right after the TLS handshake, even
+  though ALPN already picked the stack. The server recognizes and discards
+  the redundant magic bytes, so stack-only and stack-inclusive clients both
+  work on the same port. See <a href="/tls">HTTPS / TLS</a> for the
+  certificate side.
+</div>
 
 <h2>How it is negotiated over cleartext</h2>
 
@@ -20,12 +42,6 @@ handles both:</p>
     <code>Upgrade: h2c</code>. The server answers 101 and both sides continue
     in h2.</li>
 </ul>
-
-<div class="note">
-  <strong>Note:</strong> over TLS, HTTP/2 is negotiated by ALPN instead and
-  happens automatically when OpenSSL is present. h2c is the cleartext flavor;
-  the same framing code path does both.
-</div>
 
 <h2>What you get for free</h2>
 
@@ -54,9 +70,13 @@ framework's own limits:</p>
     semantics as HTTP/1.1, including the spill-to-disk path.</li>
 </ul>
 
-<h2>Is my framework using h2c?</h2>
+<h2>Trying it</h2>
 
-<p>curl speaks prior-knowledge h2c out of the box:</p>
+<p>Over TLS (h2 via ALPN):</p>
+
+<pre><code>curl --http2 -k https://localhost:8443/</code></pre>
+
+<p>Over cleartext, curl speaks prior-knowledge h2c out of the box:</p>
 
 <pre><code>curl --http2-prior-knowledge http://localhost:8080/</code></pre>
 
@@ -73,7 +93,9 @@ protocol answered.</p>
 <code>src/http/hpack.c</code> — framing, HPACK, multiplexing and GOAWAY. It
 lives in the library like everything else, so a hand-written server can serve
 h2 by calling <code>h2_serve</code> directly if it ever needs to bypass the
-top-level connection loop.</p>
+top-level connection loop; the TLS entry point swaps the socket for
+<code>tls_recv</code>/<code>tls_send_all</code> and negotiates the protocol in
+the ALPN callback.</p>
 
 <h2>Next</h2>
 

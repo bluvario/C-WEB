@@ -125,6 +125,13 @@ void http_response_set_header_replace(Http_Response *res, const char *name, cons
     response_emit_header(res, name, value, true);
 }
 
+void http_response_set_last_modified(Http_Response *res, time_t modified)
+{
+    char buf[32];
+    http_date_rfc7231(modified, buf, sizeof buf);
+    http_response_set_header(res, "Last-Modified", buf);
+}
+
 void http_response_add_body(Http_Response *res, String_View data)
 {
     strbuf_append(&res->body, data.data, data.count);

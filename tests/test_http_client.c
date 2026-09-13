@@ -182,6 +182,41 @@ static void loop_handler(Http_Request *req, Http_Response *res,
     http_response_redirect(res, HTTP_302_FOUND, "/loop");
 }
 
+// a bare HTTP/1.0 responder: one request per connection, answered with a
+// fixed body and no Connection header, then closed. the bound port travels
+// over give so the parent can start the client against it.
+static void v10_peer(int give)
+{
+    Socket_Handle srv = net_listen(0);
+    if (srv == -1) {
+        _exit(2);
+    }
+    char buf[16];
+    int n = snprintf(buf, sizeof buf, "%d", net_bound_port(srv));
+    if (write(give, buf, (size_t)n) != n) {
+        _exit(2);
+    }
+    close(give);
+    static const char hard[] =
+        "HTTP/1.0 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 5\r\n"
+        "\r\n"
+        "v1.0\n";
+    for (int i = 0; i < 4; i++) {
+        Socket_Handle cli = net_accept(srv);
+        if (cli == -1) {
+            break;
+        }
+        char rb[4096];
+        (void)net_recv(cli, rb, sizeof rb); // swallow the request head
+        (void)net_send_all(cli, hard, sizeof hard - 1);
+        net_close(cli);
+    }
+    net_close(srv);
+    _exit(0);
+}
+
 int main(void)
 {
     int fails = 0;
@@ -251,6 +286,28 @@ int main(void)
                    r.body.count == strlen("echo:/echo||hello-payload|none") &&
                    memcmp(r.body.items, "echo:/echo||hello-payload|none", r.body.count) == 0);
     http_client_result_free(&r);
+
+    // upload-from-file: a whole file POSTs on a throwaway connection
+    char upath[] = "/tmp/cweb_client_upload_XXXXXX";
+    int ufd = mkstemp(upath);
+    fails += check("temp upload file created", ufd >= 0);
+    if (ufd >= 0) {
+        (void)write(ufd, "upload-me", 9);
+        close(ufd);
+    }
+    snprintf(get_url, sizeof(get_url), "%s/echo", url);
+    fails += check("one-shot upload succeeds",
+                   http_client_post_file(get_url, upath, &r) == 0 &&
+                   r.status == HTTP_200_OK);
+    fails += check("one-shot uploaded bytes round-trip",
+                   r.body.count == strlen("echo:/echo||upload-me|none") &&
+                   memcmp(r.body.items, "echo:/echo||upload-me|none", r.body.count) == 0);
+    http_client_result_free(&r);
+    fails += check("missing upload file refused",
+                   http_client_post_file(get_url, "/nonexistent/nope", &r) == -1 &&
+                   r.error != NULL);
+    http_client_result_free(&r);
+    unlink(upath);
 
     // a route that isn't registered still lands without transport error
     snprintf(get_url, sizeof(get_url), "%s/missing", url);
@@ -369,6 +426,32 @@ int main(void)
     fails += check("still one connection after followup", http_client_connection_opens(pc) == 1);
     http_client_result_free(&r);
 
+    // a whole file uploads on the same persistent socket
+    char pfile[] = "/tmp/cweb_client_upload_pc_XXXXXX";
+    int pfd = mkstemp(pfile);
+    fails += check("temp persistent upload file created", pfd >= 0);
+    if (pfd >= 0) {
+        (void)write(pfd, "upload-me", 9);
+        close(pfd);
+    }
+    fails += check("persistent file upload succeeds",
+                   http_client_req_post_file(pc, "/echo", pfile, &r) == 0 &&
+                   r.status == HTTP_200_OK);
+    fails += check("persistent uploaded bytes round-trip",
+                   r.body.count == strlen("echo:/echo||upload-me|none") &&
+                   memcmp(r.body.items, "echo:/echo||upload-me|none", r.body.count) == 0);
+    http_client_result_free(&r);
+    fails += check("upload kept the socket", http_client_keepalive_active(pc));
+    fails += check("upload reused the socket", http_client_connection_opens(pc) == 1);
+    unlink(pfile);
+
+    // uploads share the framing path, so a follow-up reuses the same socket
+    fails += check("followup after upload on the same socket",
+                   http_client_req_get(pc, "/echo", &r) == 0 && r.status == HTTP_200_OK);
+    http_client_result_free(&r);
+    fails += check("still one connection after upload",
+                   http_client_connection_opens(pc) == 1);
+
     // a response demanding Connection: close must drop the socket
     fails += check("close-request succeeds",
                    http_client_req_get(pc, "/close", &r) == 0 && r.status == HTTP_200_OK);
@@ -439,6 +522,53 @@ int main(void)
                    r.status == HTTP_302_FOUND && r.redirects == 0);
     http_client_result_free(&r);
     http_client_set_redirects(pc, 5);
+
+    // ---- an HTTP/1.0 responder ----
+    {
+        int pfd[2];
+        int pe = pipe(pfd);
+        fails += check("v10 pipe", pe == 0);
+        if (pe == 0) {
+            pid_t pchild = fork();
+            if (pchild == 0) {
+                close(pfd[0]);
+                v10_peer(pfd[1]);
+                _exit(2);
+            }
+            close(pfd[1]);
+            char pb[16];
+            ssize_t pr = read(pfd[0], pb, sizeof pb - 1);
+            close(pfd[0]);
+            fails += check("v10 port announced", pr > 0);
+            if (pr > 0) {
+                pb[pr] = '\0';
+                char v10url[256];
+                snprintf(v10url, sizeof v10url, "http://127.0.0.1:%d", atoi(pb));
+                Http_Client *v10 = http_client_open(v10url);
+                fails += check("HTTP/1.0 client opens", v10 != NULL);
+                fails += check("HTTP/1.0 200 parsed",
+                               v10 != NULL &&
+                               http_client_req_get(v10, "/", &r) == 0 &&
+                               r.status == HTTP_200_OK);
+                fails += check("HTTP/1.0 body read",
+                               r.body.count == strlen("v1.0\n") &&
+                               memcmp(r.body.items, "v1.0\n", r.body.count) == 0);
+                fails += check("HTTP/1.0 drops the connection by default",
+                               !http_client_keepalive_active(v10));
+                http_client_result_free(&r);
+                fails += check("HTTP/1.0 next request reconnects",
+                               v10 != NULL &&
+                               http_client_req_get(v10, "/", &r) == 0 &&
+                               r.status == HTTP_200_OK);
+                fails += check("HTTP/1.0 reconnected once",
+                               http_client_connection_opens(v10) == 2);
+                http_client_result_free(&r);
+                http_client_close(v10);
+            }
+            kill(pchild, SIGTERM);
+            waitpid(pchild, NULL, 0);
+        }
+    }
 
     http_client_close(pc);
 
